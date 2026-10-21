@@ -35,9 +35,9 @@ impl ScaleMode {
     }
 }
 
-/// Detects the optimal tonic pitch class (0..11) and scale mode from the code and user prompt.
-/// Weights low-octave bass notes (octaves 0..=2) 6x higher than upper voices so a random melody
-/// note never hijacks the song's key center.
+/// Detects the dominant tonic pitch class (0..11) and scale mode from the code and user prompt.
+/// Weights low-octave bass notes (octaves 0..=2) 6x higher than upper voices so a passing melody
+/// note does not override the piece's tonal center.
 pub fn detect_scale_context(code: &str, prompt_hint: &str) -> (u8, ScaleMode) {
     let lower_code = code.to_lowercase();
     let lower_hint = prompt_hint.to_lowercase();
@@ -255,7 +255,24 @@ pub fn format_pitch_class(pc: u8, tonic_pc: u8, oct: i32) -> String {
     format!("{}{}", name, oct.clamp(0, 7))
 }
 
-/// Quantizes any single note token (including suffixes like `d2!4` or `f3*2`) to the active `(tonic_pc, mode)`.
+/// Normalizes `#` accidentals into Strudel-safe `s` spelling (e.g. `f#3!2` -> `fs3!2`)
+/// WITHOUT snapping or altering the composer's chosen pitch class!
+pub fn normalize_pitch_spelling(token: &str, tonic_pc: u8) -> String {
+    for sep in ['!', '*', '@', '/'] {
+        if let Some(idx) = token.find(sep) {
+            let (note_part, suffix) = token.split_at(idx);
+            return format!("{}{}", normalize_pitch_spelling(note_part, tonic_pc), suffix);
+        }
+    }
+
+    let Some((pc, oct, _)) = parse_pitch_token(token) else {
+        return token.to_string();
+    };
+
+    format_pitch_class(pc, tonic_pc, oct)
+}
+
+/// Quantizes a single note token to `(tonic_pc, mode)` when explicit diatonic snapping is requested.
 pub fn quantize_pitch_token(token: &str, tonic_pc: u8, mode: ScaleMode) -> String {
     for sep in ['!', '*', '@', '/'] {
         if let Some(idx) = token.find(sep) {
@@ -292,8 +309,8 @@ pub fn quantize_pitch_token(token: &str, tonic_pc: u8, mode: ScaleMode) -> Strin
     format_pitch_class(final_pc, tonic_pc, oct)
 }
 
-/// Given a root note `(pc, oct)`, builds a lush tertian chord (`[root, 3rd, 5th, 7th]`)
-/// strictly inside `(tonic_pc, mode)` so cluster chords like `[a3,b3,c4,d4]` are healed into true chords!
+/// Given a root note `(pc, oct)`, builds a tertian chord (`[root, 3rd, 5th, 7th]`)
+/// inside `(tonic_pc, mode)` to rescue accidental semitone cluster collisions like `[a3,b3,c4,d4]`.
 fn build_tertian_chord_from_root(
     root_pc: u8,
     root_oct: i32,
@@ -332,11 +349,12 @@ fn build_tertian_chord_from_root(
     format!("[{}]", voices.join(","))
 }
 
-/// Heals bracketed note groups inside `note("...")`:
-/// 1. If a comma-separated chord `[a3,b3,c4,d4]` is a dissonant stepwise cluster (adjacent intervals <= 2 semitones),
-///    automatically re-voices it into a true tertian chord `[a3,c4,e4,g4]`!
-/// 2. If a space-separated group `[c3 eb3 g3 bb3]` has strict ascending tertian chord spacing on a slow chord/pad line,
-///    converts it to `[c3,eb3,g3,bb3]`; if it's a melody or arpeggio, keeps it as a melody!
+/// Non-destructive note & chord healer:
+/// 1. Repairs accidental 3+ note semitone clusters (`[a3,b3,c4,d4]`) into playable tertian chords.
+/// 2. Converts space-separated block chords (`[c3 eb3 g3 bb3]`) on slow pad lines into comma-separated
+///    chords (`[c3,eb3,g3,bb3]`) without altering their pitch classes.
+/// 3. Preserves all intentional chromaticism, borrowed chords, blues notes, and modal inflections,
+///    normalizing only `#` syntax into Strudel-safe `s` notation.
 pub fn harmonize_and_voice_note_string(
     mini: &str,
     tonic_pc: u8,
@@ -356,7 +374,7 @@ pub fn harmonize_and_voice_note_string(
             if close < chars.len() && chars[close] == ']' {
                 let inside: String = chars[idx + 1..close].iter().collect();
 
-                // Case A: Already comma-separated chord `[n1,n2,n3,n4]`
+                // Case A: Comma-separated chord `[n1,n2,n3,n4]`
                 if inside.contains(',') {
                     let tokens: Vec<&str> = inside.split(',').map(|s| s.trim()).collect();
                     let parsed: Vec<(u8, i32, bool)> =
@@ -376,19 +394,20 @@ pub fn harmonize_and_voice_note_string(
                             idx = close + 1;
                             continue;
                         } else {
-                            let quantized: Vec<String> = tokens
+                            // Preserve exact chord pitches (including chromatic/borrowed voicings), normalizing only `#` -> `s`
+                            let spelled: Vec<String> = tokens
                                 .iter()
-                                .map(|t| quantize_pitch_token(t, tonic_pc, mode))
+                                .map(|t| normalize_pitch_spelling(t, tonic_pc))
                                 .collect();
                             bracket_healed.push('[');
-                            bracket_healed.push_str(&quantized.join(","));
+                            bracket_healed.push_str(&spelled.join(","));
                             bracket_healed.push(']');
                             idx = close + 1;
                             continue;
                         }
                     }
                 } else {
-                    // Case B: Space-separated group `[n1 n2 n3 n4]`
+                    // Case B: Space-separated group `[n1 n2 n3 n4]` on a slow chord/pad line
                     let tokens: Vec<&str> = inside.split_whitespace().collect();
                     let parsed: Vec<(u8, i32, bool)> =
                         tokens.iter().filter_map(|t| parse_pitch_token(t)).collect();
@@ -399,12 +418,12 @@ pub fn harmonize_and_voice_note_string(
                         && is_chord_pad_line
                         && is_tertian_chord_spacing(&parsed)
                     {
-                        let quantized: Vec<String> = tokens
+                        let spelled: Vec<String> = tokens
                             .iter()
-                            .map(|t| quantize_pitch_token(t, tonic_pc, mode))
+                            .map(|t| normalize_pitch_spelling(t, tonic_pc))
                             .collect();
                         bracket_healed.push('[');
-                        bracket_healed.push_str(&quantized.join(","));
+                        bracket_healed.push_str(&spelled.join(","));
                         bracket_healed.push(']');
                         idx = close + 1;
                         continue;
@@ -416,7 +435,7 @@ pub fn harmonize_and_voice_note_string(
         idx += 1;
     }
 
-    // Quantize all remaining individual note tokens in the string
+    // Normalize `#` pitch spelling on individual tokens while preserving all chromatic/modal note choices
     let mut final_str = String::with_capacity(bracket_healed.len());
     let mut token_buf = String::new();
 
@@ -431,20 +450,20 @@ pub fn harmonize_and_voice_note_string(
             token_buf.push(ch);
         } else {
             if !token_buf.is_empty() {
-                final_str.push_str(&quantize_pitch_token(&token_buf, tonic_pc, mode));
+                final_str.push_str(&normalize_pitch_spelling(&token_buf, tonic_pc));
                 token_buf.clear();
             }
             final_str.push(ch);
         }
     }
     if !token_buf.is_empty() {
-        final_str.push_str(&quantize_pitch_token(&token_buf, tonic_pc, mode));
+        final_str.push_str(&normalize_pitch_spelling(&token_buf, tonic_pc));
     }
 
     final_str
 }
 
-/// Returns true if 3+ notes in a chord are crammed within 1–2 semitones of each other (e.g. `[a3,b3,c4,d4]`).
+/// Returns true if 3+ notes in a simultaneous chord are crammed within 1–2 semitones (e.g. `[a3,b3,c4,d4]`).
 fn is_stepwise_cluster(notes: &[(u8, i32, bool)]) -> bool {
     let mut semis: Vec<i32> = notes.iter().map(|&(pc, oct, _)| oct * 12 + pc as i32).collect();
     semis.sort_unstable();
@@ -459,7 +478,7 @@ fn is_stepwise_cluster(notes: &[(u8, i32, bool)]) -> bool {
 }
 
 /// Returns true ONLY if space-separated notes are strictly ascending in 3rd/4th intervals (3..=5 semitones)
-/// in octaves 2..=5, ensuring melodic phrases and arpeggios with leaps or contour changes stay melodies!
+/// in octaves 2..=5, ensuring melodic phrases and arpeggios with leaps or contour changes stay melodies.
 fn is_tertian_chord_spacing(notes: &[(u8, i32, bool)]) -> bool {
     let semis: Vec<i32> = notes.iter().map(|&(pc, oct, _)| oct * 12 + pc as i32).collect();
     if semis.iter().any(|&s| s < 24 || s > 72) {
@@ -579,9 +598,9 @@ pub fn auto_mix_and_carve_frequencies(code: &str) -> String {
     out_lines.join("\n")
 }
 
-/// Pure Agentic Harmonic & Structural Context:
-/// Provides the active diatonic scale notes and a 7-degree diatonic chord reference table
-/// without forcing a hardcoded `[0, 5, 3, 4]` loop or pre-named section variables.
+/// Optional Harmonic & Architectural Context:
+/// Supplies a suggested tonal center and chord palette for inspiration or continuity without
+/// forcing diatonic conformity, fixed section counts, or mandatory slider/visualizer quotas.
 pub fn build_orchestration_directive(
     user_prompt: &str,
     style_ref: &str,
@@ -605,7 +624,6 @@ pub fn build_orchestration_directive(
             ScaleMode::Major,
             ScaleMode::MelodicMinor,
         ];
-        // If no explicit mode keyword was matched and it defaulted to NaturalMinor, allow seed entropy to explore modes
         let final_mode = if inferred_mode == ScaleMode::NaturalMinor && (seed % 3 != 0) {
             all_modes[((seed / 13) as usize) % all_modes.len()]
         } else {
@@ -626,23 +644,21 @@ pub fn build_orchestration_directive(
     if let Some(current) = existing_code {
         let current_sections = count_sections_and_triggers(current);
         format!(
-            "PURE AGENTIC EVOLUTION CONTEXT (Generation #{} | Current Score Triggers: {})\n\
-             - ACTIVE KEY & MODE: **{}**\n\
-             - ALLOWED DIATONIC PITCH CLASSES: `{}`\n\
-             - 7-DEGREE DIATONIC TERTIAN CHORD REFERENCE (Choose any degrees/progressions freely; use commas inside `[...]`): `{}`\n\
-             - AGENTIC EVOLUTION MANDATE: Analyze the existing score and the user's prompt. You have complete freedom to invent new sections, bridges, counter-melodies, timed solos, rhythmic modulations, and custom `slider(...)` macro controls.",
+            "EVOLUTION CONTEXT & OPTIONAL HARMONIC PALETTE (Generation #{} | Active Triggers: {})\n\
+             - DETECTED TONAL CENTER: **{}** (Reference pitch classes: `{}`)\n\
+             - OPTIONAL DIATONIC CHORD PALETTE (Use commas inside `[...]` for simultaneous chords): `{}`\n\
+             - HARMONIC & STRUCTURAL FREEDOM: Preserve the core musical identity of the score where appropriate, or introduce chromaticism, modal mixture, key modulations, polyrhythms, new movements, or structural transformations as the user's evolution directive demands.",
             evo_gen, current_sections, key_label, scale_notes, degree_table
         )
     } else {
         format!(
-            "PURE AGENTIC HARMONIC & ORCHESTRATION CONTEXT (Entropy Seed #{})\n\
-             - SUGGESTED KEY & MODE (Unless overridden by user prompt): **{}**\n\
-             - DIATONIC SCALE PITCH CLASSES: `{}`\n\
-             - 7-DEGREE DIATONIC TERTIAN CHORD REFERENCE (Use commas inside `[...]` for polyphonic chords): `{}`\n\
-             - AGENTIC COMPOSITION MANDATE:\n\
-               1. ZERO TEMPLATES: Do not copy any preset loop or stock progression. Invent your own chord progressions, melodies, bridges, basslines, and drum grooves from scratch.\n\
-               2. DYNAMIC SONG SECTIONS: Structure the piece so sections genuinely turn on and off over time (using named movement variables inside a single master `arrange([cycles, section], ...)` or long-form cycle masks).\n\
-               3. LIVE MACRO SLIDERS & VISUALS: Design a custom console of top-level `const` `slider(...)` controls tailored to this specific track's synthesis, and attach visualizers (`._scope()`, `._pianoroll()`, `._punchcard()`, `._spiral()`).",
+            "OPTIONAL HARMONIC & ARCHITECTURAL RESOURCES (Entropy Seed #{})\n\
+             - SUGGESTED TONAL CENTER (Optional starting point unless overridden by prompt): **{}**\n\
+             - REFERENCE SCALE PITCH CLASSES: `{}` (Chromatic passing tones, borrowed chords, modal shifts, and microtonal detuning are welcome whenever musically appropriate).\n\
+             - OPTIONAL TERTIAN CHORD PALETTE (Use commas inside `[...]` when voicing simultaneous chords): `{}`\n\
+             - FORM FOLLOWS MUSICAL INTENT:\n\
+               * Choose the structure that genuinely fits the brief—whether that is a multi-movement `arrange([cycles, section], ...)` journey, a continuous evolving `stack(...)` groove using `.every(...)` / `.mask(...)` / `.struct(...)`, an ambient soundscape with no drums, or an asymmetric polyrhythmic study.\n\
+               * Include top-level `const` `slider(...)` macros and inline visualizers (`._scope()`, `._pianoroll()`, `._punchcard()`, `._spiral()`) when they enhance the piece or when requested by the user, rather than forcing a fixed quota.",
             seed % 10000,
             key_label,
             scale_notes,
@@ -663,8 +679,6 @@ fn build_scale_note_list(tonic_pc: u8, mode: ScaleMode) -> String {
     names.join(", ")
 }
 
-/// Builds a reference dictionary of all 7 diatonic scale degrees (I..VII) voiced as 4-note tertian chords
-/// so the AI can freely invent its own progressions for verses, choruses, and bridges without a fixed loop.
 fn build_diatonic_degree_table(tonic_pc: u8, mode: ScaleMode) -> String {
     let intervals = mode.intervals();
     let roman = ["I", "II", "III", "IV", "V", "VI", "VII"];

@@ -2,11 +2,12 @@ use crate::orchestrator::{
     auto_mix_and_carve_frequencies, detect_scale_context, harmonize_and_voice_note_string,
     ScaleMode,
 };
+use crate::sonic_intelligence::ExternalAstAnalysis;
 use std::collections::HashSet;
 
 /// Full pipeline: extracts code, preserves multi-movement `const` stems, normalizes quotes,
-/// heals unquoted `[0 0.01]*8` modifiers, heals slider math, re-voices cluster chords into
-/// tertian harmony while protecting melodies/solos, fixes `arrange()` vs `stack()`, and auto-mixes.
+/// heals unquoted `[0 0.01]*8` modifiers, heals slider math, rescues accidental semitone clusters
+/// while preserving intentional chromaticism/melodies, fixes `arrange()` vs `stack()`, and auto-mixes.
 pub fn compile_and_heal_strudel(raw: &str) -> Result<String, String> {
     let stripped = strip_thinking_and_extract_code(raw);
     if stripped.trim().is_empty() {
@@ -47,8 +48,9 @@ pub fn compile_and_heal_strudel(raw: &str) -> Result<String, String> {
         // 2. Normalize single-quoted strings ('...') into double-quoted strings ("...")
         line = normalize_single_quoted_strings(&line);
 
-        // 3. Heal foreign dialects, unquoted mini-modifiers (.late([0 0.01]*8)), slider math, and JS arrays
+        // 3. Heal foreign dialects, slider declarations, unquoted mini-modifiers, slider math, and JS arrays
         line = heal_foreign_dialects(&line);
+        line = heal_slider_declarations(&line);
         line = heal_unquoted_mini_modifiers(&line);
         line = heal_slider_math_expressions(&line);
         line = heal_bracketed_numeric_arrays(&line);
@@ -57,7 +59,7 @@ pub fn compile_and_heal_strudel(raw: &str) -> Result<String, String> {
         // 4. Scrub chained methods against the official Strudel API whitelist
         line = scrub_method_chains(&line);
 
-        // 5. Repair mini-notation strings, heal cluster chords, and harmonize to scale mode
+        // 5. Repair mini-notation strings and rescue accidental cluster collisions without erasing chromaticism
         line = repair_and_harmonize_mini_strings(&line, tonic_pc, scale_mode);
 
         processed_lines.push(line);
@@ -68,9 +70,9 @@ pub fn compile_and_heal_strudel(raw: &str) -> Result<String, String> {
         processed_lines.insert(0, "setcps(0.55)".to_string());
     }
 
-    // 7. Order of operations is critical:
+    // 7. Order of operations:
     //    First repair missing commas, then balance global parentheses/brackets,
-    //    then merge multiple top-level roots, and finally heal arrange() vs stack() pairs!
+    //    then merge multiple top-level roots, and finally heal arrange() vs stack() pairs.
     let joined = processed_lines.join("\n");
     let comma_healed = repair_stack_commas(&joined);
     let balanced = balance_global_parentheses(&comma_healed);
@@ -83,6 +85,84 @@ pub fn compile_and_heal_strudel(raw: &str) -> Result<String, String> {
 
     validate_strudel_ast(&mixed)?;
     Ok(mixed)
+}
+
+/// Extracts structural analysis from successfully healed Strudel code
+/// to feed directly into MotifAI's Sonic Intelligence subsystem.
+pub fn analyze_ast_health(
+    healed_code: &str,
+    warnings: Vec<String>,
+    success: bool,
+) -> ExternalAstAnalysis {
+    let mut parsed_sections = Vec::new();
+    let mut slider_names = Vec::new();
+    let mut visualizer_names = Vec::new();
+    let pattern_signatures = extract_trigger_strings(healed_code);
+    let mut cycle_count = 0usize;
+
+    for line in healed_code.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("const ") || trimmed.starts_with("let ") {
+            if let Some((left, right)) = trimmed.split_once('=') {
+                if right.contains("stack(") || right.contains("arrange(") {
+                    let name = left.split_whitespace().nth(1).unwrap_or_default().trim();
+                    if !name.is_empty() {
+                        parsed_sections.push(name.to_string());
+                    }
+                }
+                if right.contains("slider(") {
+                    let name = left.split_whitespace().nth(1).unwrap_or_default().trim();
+                    if !name.is_empty() {
+                        slider_names.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        for viz in [
+            "_scope",
+            "_pianoroll",
+            "_punchcard",
+            "_spiral",
+            "_spectrum",
+            "_pitchwheel",
+            "scope",
+            "pianoroll",
+            "punchcard",
+            "spiral",
+            "spectrum",
+            "pitchwheel",
+        ] {
+            if trimmed.contains(viz) {
+                let clean_viz = viz.trim_start_matches('_').to_string();
+                if !visualizer_names.contains(&clean_viz) {
+                    visualizer_names.push(clean_viz);
+                }
+            }
+        }
+    }
+
+    if let Some(arr_idx) = healed_code.find("arrange(") {
+        let tail = &healed_code[arr_idx..];
+        for segment in tail.split('[') {
+            if let Some(comma_idx) = segment.find(',') {
+                let num_str = segment[..comma_idx].trim();
+                if let Ok(cycles) = num_str.parse::<usize>() {
+                    cycle_count += cycles;
+                }
+            }
+        }
+    }
+
+    ExternalAstAnalysis {
+        ast_compiled_cleanly: success,
+        warnings,
+        parsed_sections,
+        slider_names,
+        cycle_count,
+        visualizer_names,
+        pattern_signatures,
+    }
 }
 
 /// Converts single-quoted strings `'...'` into double-quoted `"..."` so the mini-notation
@@ -118,6 +198,28 @@ fn normalize_single_quoted_strings(line: &str) -> String {
     }
 
     out.push_str(comment_part);
+    out
+}
+
+/// Repairs missing commas in numeric `slider(0.4 0.20, 1.00, 0.05)` declarations.
+fn heal_slider_declarations(line: &str) -> String {
+    let mut out = line.to_string();
+    if let Some(pos) = out.find("slider(") {
+        let start_args = pos + 7;
+        if let Some(close_rel) = find_matching_close_paren(&out[start_args..]) {
+            let inner = &out[start_args..start_args + close_rel];
+            if !inner.contains('"') {
+                let tokens: Vec<&str> = inner
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if tokens.len() >= 2 && tokens.iter().all(|t| t.parse::<f32>().is_ok()) {
+                    let healed_inner = tokens.join(", ");
+                    out.replace_range(start_args..start_args + close_rel, &healed_inner);
+                }
+            }
+        }
+    }
     out
 }
 
@@ -192,7 +294,6 @@ fn heal_bracketed_numeric_arrays(line: &str) -> String {
                 if is_numeric_list {
                     let parts: Vec<&str> = trimmed_inner.split_whitespace().collect();
                     if parts.len() > 1 {
-                        // Check if followed by `*` or `/` (mini-notation multiplier outside quotes)
                         let mut k = j + 1;
                         while k < chars.len() && chars[k].is_whitespace() {
                             k += 1;
@@ -231,8 +332,8 @@ fn heal_bracketed_numeric_arrays(line: &str) -> String {
     out
 }
 
-/// If the model outputs two or more top-level `arrange(...)` or `stack(...)` blocks separated by commas
-/// (which causes `Unexpected token` in Strudel), wraps all top-level root expressions inside a single `stack(...)`.
+/// If the model outputs two or more top-level `arrange(...)` or `stack(...)` blocks separated by commas,
+/// wraps all top-level root expressions inside a single `stack(...)`.
 fn merge_multiple_top_level_roots(code: &str) -> String {
     let mut header_lines = Vec::new();
     let mut body_lines = Vec::new();
@@ -280,7 +381,6 @@ fn merge_multiple_top_level_roots(code: &str) -> String {
         return code.to_string();
     }
 
-    // Count how many top-level root expressions exist in `trimmed_body`
     let mut top_expr_count = 0usize;
     let mut p_depth = 0i32;
     let mut b_depth = 0i32;
@@ -338,11 +438,10 @@ fn update_depths(code_only: &str, paren_depth: &mut i32, bracket_depth: &mut i32
 }
 
 /// Ensures `arrange(...)` only receives `[cycles, pattern]` pairs AND upgrades `stack([8, intro], [12, verse])`
-/// into `arrange([8, intro], [12, verse])` if the model accidentally wrote `stack` for `[cycles, pattern]` pairs!
+/// into `arrange([8, intro], [12, verse])` if the model accidentally wrote `stack` for `[cycles, pattern]` pairs.
 fn heal_broken_arrange_calls(code: &str) -> String {
     let mut out = code.to_string();
 
-    // 1. If the model wrote `arrange(...)` where arguments are NOT `[cycles, pattern]` pairs, convert to `stack(...)`
     let mut search_pos = 0;
     while let Some(rel) = out[search_pos..].find("arrange(") {
         let pos = search_pos + rel;
@@ -362,8 +461,6 @@ fn heal_broken_arrange_calls(code: &str) -> String {
         }
     }
 
-    // 2. Conversely, if the model wrote `stack([8, ...], [12, ...])` with `[cycles, pattern]` pairs,
-    //    upgrade `stack(` into `arrange(` so Strudel doesn't crash on `[number, Pattern]` inside `stack()`!
     let mut stack_search = 0;
     while let Some(rel) = out[stack_search..].find("stack(") {
         let pos = stack_search + rel;
@@ -448,18 +545,53 @@ fn all_top_level_args_are_pairs(inner: &str) -> bool {
     })
 }
 
+/// Inspects both fresh compositions and evolutions for:
+/// 1. Hardcoded legacy reference templates.
+/// 2. Internal section cloning (where distinct named movements share 100% identical trigger sets
+///    and only tweak `.gain()` or `.lpf()` multipliers).
+/// 3. Evolution stagnation (distinguishing intentional ostinato continuity from lazy repetition).
 pub fn check_clone_or_stagnation(new_code: &str, previous_code: Option<&str>) -> Option<String> {
     let lower = new_code.to_lowercase();
-    let has_cliche_bass = lower.contains("<[c1 c2]*4 [ab0 ab1]*4 [f0 f1]*4 [g0 g1]*4>");
-    let has_cliche_lead = lower.contains("c5 [eb5 g5] bb5 g5 eb5 [d5 c5] b4 <g4 d5>");
 
-    if has_cliche_bass && has_cliche_lead {
+    // 1. Check banned legacy template phrases
+    let has_c_minor_cliche = lower.contains("<[c1 c2]*4 [ab0 ab1]*4 [f0 f1]*4 [g0 g1]*4>")
+        && lower.contains("c5 [eb5 g5] bb5 g5 eb5 [d5 c5] b4 <g4 d5>");
+    let has_d_minor_ref_cliche =
+        lower.contains("<[d3,f3,a3,d4] [bb2,d3,f3,a3] [g2,bb2,d3,g3] [a2,cs3,e3,g3]>/2")
+            && lower.contains("[d4 f4 a4 d5 a4 f4 e4 cs4]*2");
+
+    if has_c_minor_cliche || has_d_minor_ref_cliche {
         return Some(
-            "CLONE DETECTED: You output banned hardcoded template notes. Compose 100% original notes and sections!"
+            "CLONE DETECTED: Output contained legacy reference notes. Invent 100% original progressions, rhythms, and melodies!"
                 .to_string(),
         );
     }
 
+    // 2. Check internal movement cloning (applies to BOTH fresh generations and evolutions)
+    let named_sections = extract_named_section_blocks(new_code);
+    if named_sections.len() >= 2 {
+        for i in 0..named_sections.len() {
+            for j in (i + 1)..named_sections.len() {
+                let (ref name_a, ref body_a) = named_sections[i];
+                let (ref name_b, ref body_b) = named_sections[j];
+
+                // Extract the trigger sets (`note("...")`, `s("...")`, `n("...")`) inside each movement
+                let triggers_a: HashSet<String> =
+                    extract_trigger_strings(body_a).into_iter().collect();
+                let triggers_b: HashSet<String> =
+                    extract_trigger_strings(body_b).into_iter().collect();
+
+                if !triggers_a.is_empty() && triggers_a == triggers_b {
+                    return Some(format!(
+                        "INTERNAL SECTION CLONE DETECTED: Movements `{}` and `{}` contain the exact same note/rhythm patterns with only gain or filter tweaks. Give `{}` genuinely new melodic, harmonic, or rhythmic patterns!",
+                        name_a, name_b, name_b
+                    ));
+                }
+            }
+        }
+    }
+
+    // 3. Check evolution stagnation against previous score (when evolving via Ctrl+E)
     if let Some(prev) = previous_code {
         let new_triggers = extract_trigger_strings(new_code);
         let prev_triggers = extract_trigger_strings(prev);
@@ -471,10 +603,14 @@ pub fn check_clone_or_stagnation(new_code: &str, previous_code: Option<&str>) ->
                 .count();
             let ratio = matching as f32 / new_triggers.len().max(1) as f32;
 
-            let did_not_expand = new_triggers.len() <= prev_triggers.len();
-            if did_not_expand && ratio >= 0.88 {
+            let prev_sections = extract_named_section_blocks(prev).len();
+            let curr_sections = named_sections.len();
+            let added_sections = curr_sections > prev_sections;
+            let expanded_triggers = new_triggers.len() > prev_triggers.len() + 1;
+
+            if !added_sections && !expanded_triggers && ratio >= 0.85 {
                 return Some(format!(
-                    "STAGNATION DETECTED: {:.0}% pattern match with no expansion. Add new song sections (intro, verse, chorus, bridge, solo) or mutate the patterns!",
+                    "STAGNATION DETECTED: {:.0}% of patterns remained identical to the previous score without structural or contrapuntal expansion. Evolve the harmony, introduce new counter-melodies or rhythmic transformations, or add a new movement!",
                     ratio * 100.0
                 ));
             }
@@ -482,6 +618,60 @@ pub fn check_clone_or_stagnation(new_code: &str, previous_code: Option<&str>) ->
     }
 
     None
+}
+
+/// Extracts `(section_name, section_body)` for all `const name = stack(...)` blocks.
+fn extract_named_section_blocks(code: &str) -> Vec<(String, String)> {
+    let mut sections = Vec::new();
+    let lines: Vec<&str> = code.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if (trimmed.starts_with("const ") || trimmed.starts_with("let "))
+            && trimmed.contains("stack(")
+        {
+            if let Some((_, after_kw)) = trimmed.split_once(' ') {
+                if let Some((sec_name_raw, _)) = after_kw.split_once('=') {
+                    let sec_name = sec_name_raw.trim().to_string();
+                    let mut body = String::new();
+                    let mut depth = 0i32;
+                    let mut started = false;
+
+                    while i < lines.len() {
+                        let line = lines[i];
+                        let code_part = line.split("//").next().unwrap_or("");
+                        let mut in_quote = false;
+                        for ch in code_part.chars() {
+                            if ch == '"' {
+                                in_quote = !in_quote;
+                            } else if !in_quote {
+                                if ch == '(' {
+                                    depth += 1;
+                                    started = true;
+                                } else if ch == ')' {
+                                    depth -= 1;
+                                }
+                            }
+                        }
+                        body.push_str(line);
+                        body.push('\n');
+                        i += 1;
+                        if started && depth <= 0 {
+                            break;
+                        }
+                    }
+                    if !sec_name.is_empty() {
+                        sections.push((sec_name, body));
+                    }
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    sections
 }
 
 fn extract_trigger_strings(code: &str) -> Vec<String> {
@@ -517,8 +707,8 @@ fn extract_trigger_strings(code: &str) -> Vec<String> {
     triggers
 }
 
-/// Strips <think>...</think> blocks, markdown fences, leading filler, and trailing prose,
-/// while preserving multi-movement `const intro = ...`, `const verse = ...`, and `arrange(...)` blocks.
+/// Strips `<think>...</think>` blocks, markdown fences, leading filler, and trailing prose,
+/// while preserving multi-movement `const` stems and root expressions.
 fn strip_thinking_and_extract_code(raw: &str) -> String {
     let mut text = raw.to_string();
 
@@ -563,7 +753,6 @@ fn strip_thinking_and_extract_code(raw: &str) -> String {
             break;
         }
 
-        // Only mark `seen_top_level_root` when a standalone `arrange(` or `stack(` (NOT `const intro = stack(`) starts at depth 0
         if paren_depth == 0
             && (trimmed.starts_with("stack(")
                 || trimmed.starts_with("arrange(")
@@ -680,7 +869,7 @@ fn normalize_tempo_line(trimmed: &str) -> String {
 }
 
 /// Heals broken JS math on Pattern sliders like `.gain(VOLUME * 0.88)` -> `.gain(VOLUME.mul(0.88))`
-/// and heals `sine.range(BASS_CUT * 0.8, BASS_CUT * 2)` -> safe numeric range `[450, 2200]`.
+/// or `.gain(SUB_WEIGHT / 2)` -> `.gain(SUB_WEIGHT.div(2))`.
 fn heal_slider_math_expressions(line: &str) -> String {
     let mut out = line.to_string();
 
@@ -708,6 +897,13 @@ fn heal_slider_math_expressions(line: &str) -> String {
                             out.replace_range(start_args..start_args + close_rel, &rep);
                         } else if is_ident(r) && l.parse::<f32>().is_ok() {
                             let rep = format!("{}.mul({})", r, l);
+                            out.replace_range(start_args..start_args + close_rel, &rep);
+                        }
+                    } else if let Some((left, right)) = inner.split_once('/') {
+                        let l = left.trim();
+                        let r = right.trim();
+                        if is_ident(l) && r.parse::<f32>().is_ok() {
+                            let rep = format!("{}.div({})", l, r);
                             out.replace_range(start_args..start_args + close_rel, &rep);
                         }
                     }
@@ -758,7 +954,6 @@ fn heal_synth_dsp_traps(line: &str) -> String {
 
             let mut fixed_inner = inner.clone();
             if inner.contains('*') || inner.contains('/') {
-                // Heal `sine.range(BASS_CUT * 0.8, BASS_CUT * 2)` where JS `*` on Pattern slider causes NaN
                 fixed_inner = "500, 2600".to_string();
             } else if let Some((low_s, high_s)) = inner.split_once(',') {
                 if let (Ok(low), Ok(high)) =
@@ -856,7 +1051,7 @@ fn scrub_method_chains(line: &str) -> String {
         "palindrome", "iter", "off", "arp", "superimpose", "layer", "linger", "zoom", "within",
         "compress", "hurry", "scramble", "segment", "seg", "chunk", "range", "rangex", "color",
         "pianoroll", "_pianoroll", "scope", "_scope", "punchcard", "_punchcard", "spiral",
-        "_spiral", "pitchwheel", "_pitchwheel",
+        "_spiral", "pitchwheel", "_pitchwheel", "spectrum", "_spectrum",
     ]
     .into_iter()
     .collect();
@@ -879,7 +1074,11 @@ fn scrub_method_chains(line: &str) -> String {
         .replace(".drive(", ".shape(")
         .replace(".delayfb(", ".delayfeedback(")
         .replace(".delayt(", ".delaytime(")
-        .replace(".vibrato(", ".vib(");
+        .replace(".vibrato(", ".vib(")
+        .replace("._spectrogram(", "._spectrum(")
+        .replace(".spectrogram(", "._spectrum(")
+        .replace("._scopex(", "._scope(")
+        .replace(".scopex(", "._scope(");
 
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
@@ -953,9 +1152,8 @@ fn clamp_dsp_args(method: &str, args: &str) -> String {
     args.to_string()
 }
 
-/// Repairs mini-notation strings AND harmonizes `note("...")` strings via `crate::orchestrator`.
-/// Distinguishes true chord/pad progressions from fast melodies/arpeggios/solos so melodic phrases
-/// are never flattened into block chords!
+/// Repairs mini-notation strings and rescues accidental semitone clusters via `crate::orchestrator`
+/// while preserving intentional chromaticism and melodic phrases.
 fn repair_and_harmonize_mini_strings(line: &str, tonic_pc: u8, mode: ScaleMode) -> String {
     if !line.contains('"') {
         return line.to_string();
@@ -1103,7 +1301,6 @@ fn repair_stack_commas(code: &str) -> String {
         let code_only = trimmed.split("//").next().unwrap_or("").trim_end();
         update_depths(code_only, &mut paren_depth, &mut bracket_depth);
 
-        // Only insert missing commas when we are INSIDE an open `stack(...)` or `arrange(...)` (paren_depth >= 1)
         if paren_depth >= 1
             && (code_only.ends_with(')') || code_only.ends_with(']'))
             && !code_only.starts_with("setcps")

@@ -3,3 +3,7 @@
 *.log
 Ambient Ai.js
 masterpiece.strudel.js
+motif_memory.json
+*.bak
+*.corrupt.*
+.DS_Store

@@ -1,3 +1,6 @@
+mod sonic_intelligence;
+use sonic_intelligence::{ExternalAstAnalysis, OutcomeSignal, SonicIntelligence};
+
 #[allow(non_snake_case, dead_code)]
 mod orchestrator;
 #[allow(dead_code)]
@@ -43,13 +46,10 @@ const STRUDEL_WEB_HASH: &str = concat!("https", "://", "strudel.cc/#");
 const STRUDEL_REPL_CDN: &str = concat!("https", "://", "unpkg.com/@strudel/repl@latest");
 const STRUDEL_HOME_URL: &str = concat!("https", "://", "strudel.cc");
 
-const STANDBY_BUFFER: &str = r##"// [AGENTIC STANDBY] Zero Presets. Zero Templates. 100% Autonomous AI Composition.
-// Enter your Vision in Pane [1] and Style/URL DNA in Pane [2], then press [Ctrl+G] or [F5].
+const STANDBY_BUFFER: &str = r##"// [AGENTIC READY] Zero Presets. Zero Templates. 100% Autonomous AI Composition.
+// Enter your Musical Vision in Pane [1] and Style DNA in Pane [2], then press [Ctrl+G] or [F5].
 setcps(0.55)
-
-stack(
-  s("bd ~ ~ ~").bank("RolandTR909").gain(0.75).color("#00f0ff")._scope()
-)"##;
+"##;
 
 fn ollama_endpoint(path: &str) -> String {
     format!("http{}{}:{}{}", "://", LOOPBACK_IP, OLLAMA_PORT, path)
@@ -81,20 +81,37 @@ fn log_diag(stage: &str, detail: &str) {
     }
 }
 
-fn get_strudel_system_prompt() -> String {
-    if let Ok(rules) = fs::read_to_string("strudel_rules.md") {
+fn get_strudel_system_prompt(empirical_advisory: &str) -> String {
+    let visual_repertoire = "\
+VISUAL ARCHITECTURE & INLINE TELEMETRY REPERTOIRE:\n\
+- Weave inline visualizers directly onto individual stems inside your `stack(...)` blocks so the code becomes a living visual instrument:\n\
+  1. Attach `.color(\"#00f0ff\")._pianoroll()` or `.color(\"#39ff14\")._pianoroll()` onto melodic, arpeggio, and acid bass `note(...)` chains for cascading note-grid telemetry.\n\
+  2. Attach `.color(\"#ff8800\")._punchcard()` or `.color(\"#a6b8ff\")._punchcard()` onto rhythmic drum and percussion `s(...)` or `.struct(...)` chains for wide block-grid tracking.\n\
+  3. Attach `.color(\"#ff5500\")._scope()` or `.color(\"#00ffcc\")._scope()` onto sub-bass, lead, or master harmonic stems for real-time oscilloscope waveforms.\n\
+  4. Attach `.color(\"#b829ff\")._spiral()` or `._pitchwheel()` onto evolving polyphonic or detuned pad layers.\n\
+- Always pair visualizers with intentional, high-contrast `.color(\"...\")` hex or named colors so each movement has a distinct visual signature.";
+
+    let base_rules = if let Ok(rules) = fs::read_to_string("strudel_rules.md") {
         format!(
             "You are an autonomous algorithmic composer and master of Strudel ({}). \
              You operate with 100% creative agency—never use stock templates or repetitive loops. \
              Follow ONLY the syntax and DSP rules below and the user's prompt to invent a bespoke musical work. \
              Your sole output must be valid, executable Strudel JavaScript code—no markdown fences, no prose outside '//' comments.\n\n\
              {}\n\n\
-             Return ONLY raw executable Strudel code starting with setcps():",
-            STRUDEL_HOME_URL, rules
+             {}\n\n",
+            STRUDEL_HOME_URL, rules, visual_repertoire
         )
     } else {
-        r##"You are an autonomous algorithmic composer and master of Strudel. Output ONLY valid executable Strudel code starting with setcps():"##.to_string()
-    }
+        format!(
+            "You are an autonomous algorithmic composer and master of Strudel. Output ONLY valid executable Strudel code starting with setcps().\n\n{}\n\n",
+            visual_repertoire
+        )
+    };
+
+    format!(
+        "{}\n{}\nReturn ONLY raw executable Strudel code starting with setcps():",
+        base_rules, empirical_advisory
+    )
 }
 
 #[derive(Serialize)]
@@ -129,7 +146,7 @@ struct ModelInfo {
 enum BotEvent {
     ModelsDiscovered(Vec<String>),
     StatusUpdate(String),
-    Generated(String),
+    Generated(String, ExternalAstAnalysis, Option<String>), // code, ast_analysis, previous_code
     Error(String),
 }
 
@@ -145,19 +162,28 @@ struct App {
     model_index: usize,
     scroll_offset: u16,
     evolution_count: u32,
+    intelligence: SonicIntelligence,
+    active_experiment_id: Option<String>,
 }
 
 impl App {
     fn new(shared_code: Arc<RwLock<String>>) -> Self {
         let default_model =
             std::env::var("STRUDEL_MODEL").unwrap_or_else(|_| "qwen2.5-coder:14b".to_string());
+        let intelligence = SonicIntelligence::load_or_init();
         log_diag(
             "INIT",
             &format!(
-                "Starting Strudel Forge v6.0 [PURE AGENTIC]; default_model={}",
-                default_model
+                "Starting Strudel Forge v6.0 [PURE AGENTIC]; default_model={}; memory_path={}",
+                default_model,
+                intelligence.persistence_path().display()
             ),
         );
+
+        if let Some(ref err) = intelligence.last_persistence_error {
+            log_diag("SONIC_INTELLIGENCE_WARNING", err);
+        }
+
         Self {
             prompt_input: String::new(),
             style_reference: String::new(),
@@ -172,6 +198,8 @@ impl App {
             model_index: 0,
             scroll_offset: 0,
             evolution_count: 0,
+            intelligence,
+            active_experiment_id: None,
         }
     }
 
@@ -339,24 +367,40 @@ fn build_embedded_studio_html(code: &str, b64: &str) -> String {
 <html>
 <head>
 <meta charset="utf-8">
-<title>🌀 STRUDEL FORGE v6.0 // Pure Agentic Studio</title>
+<title>🌀 MOTIFAI // Pure Agentic Visual Studio</title>
 <script src="{}"></script>
 <style>
-  body {{ background:#07080c; color:#e0f7ff; font-family:'Consolas',monospace; margin:0; padding:0; }}
-  header {{ background:#0f121d; border-bottom:1px solid #00f0ff; padding:12px 20px; display:flex; justify-content:space-between; align-items:center; }}
-  .title {{ color:#00f0ff; font-weight:bold; font-size:16px; letter-spacing:1px; }}
-  .btn {{ background:#ff007f; color:#fff; text-decoration:none; padding:8px 16px; border-radius:4px; font-weight:bold; margin-left:10px; }}
-  .hint {{ padding:8px 20px; background:#121624; color:#ffd700; font-size:13px; border-bottom:1px solid #222; }}
+  :root {{
+    --accent: #00f0ff;
+    --bg: #06080e;
+    --panel: #0d111a;
+    --text: #e0f7ff;
+  }}
+  body {{ background:var(--bg); color:var(--text); font-family:'Consolas','Fira Code',monospace; margin:0; padding:0; transition: background 0.25s ease; }}
+  header {{ background:var(--panel); border-bottom:1px solid var(--accent); padding:10px 20px; display:flex; justify-content:space-between; align-items:center; box-shadow: 0 0 18px rgba(0,240,255,0.12); }}
+  .title {{ color:var(--accent); font-weight:bold; font-size:15px; letter-spacing:1.2px; text-shadow: 0 0 8px rgba(0,240,255,0.35); }}
+  .controls {{ display:flex; align-items:center; gap:8px; }}
+  .theme-btn {{ background:#141a29; color:var(--text); border:1px solid var(--accent); padding:5px 10px; border-radius:4px; font-family:inherit; font-size:12px; cursor:pointer; }}
+  .theme-btn:hover {{ background:var(--accent); color:#050608; font-weight:bold; }}
+  .btn {{ background:#ff007f; color:#fff; text-decoration:none; padding:7px 14px; border-radius:4px; font-weight:bold; font-size:12px; margin-left:6px; }}
+  .hint {{ padding:7px 20px; background:#0b0e17; color:#ffd700; font-size:12.5px; border-bottom:1px solid #1c2333; display:flex; justify-content:space-between; }}
 </style>
 </head>
 <body>
 <header>
-  <div class="title">🌀 STRUDEL FORGE v6.0 // PURE AGENTIC CREATION STUDIO (ZERO TEMPLATES)</div>
-  <div>
+  <div class="title">🌀 MOTIFAI v6.0 // SONIC INTELLIGENCE & INLINE VISUALIZER SANCTUARY</div>
+  <div class="controls">
+    <button class="theme-btn" onclick="setTheme('#00f0ff','#06080e','#0d111a')">Cyber Cyan</button>
+    <button class="theme-btn" onclick="setTheme('#a6b8ff','#080b1c','#101636')">Punchcard Indigo</button>
+    <button class="theme-btn" onclick="setTheme('#ff8800','#0a0705','#17100a')">Solar Scope</button>
+    <button class="theme-btn" onclick="setTheme('#39ff14','#040a05','#09170b')">Matrix Green</button>
     <a class="btn" id="popout" href="#">Open Full Strudel.cc REPL ↗</a>
   </div>
 </header>
-<div class="hint">⚡ <b>100% Agentic Score Compiled, Orbits Isolated & Scale Locked!</b> Click inside the editor and press <b>Ctrl+Enter</b> to play.</div>
+<div class="hint">
+  <span>⚡ <b>Inline Visualizers Armed (._pianoroll, ._punchcard, ._scope, ._spiral)!</b> Click inside the editor and press <b>Ctrl+Enter</b> to play.</span>
+  <span>Empirical Memory: <b>Active</b></span>
+</div>
 <strudel-editor id="repl">
 <!--
 {}
@@ -366,6 +410,11 @@ fn build_embedded_studio_html(code: &str, b64: &str) -> String {
   const b64 = "{}";
   const webHash = "{}";
   document.getElementById("popout").href = webHash + encodeURIComponent(b64);
+  function setTheme(accent, bg, panel) {{
+    document.documentElement.style.setProperty('--accent', accent);
+    document.documentElement.style.setProperty('--bg', bg);
+    document.documentElement.style.setProperty('--panel', panel);
+  }}
 </script>
 </body>
 </html>"##,
@@ -437,6 +486,7 @@ async fn generate_strudel_track(
     style_ref: String,
     existing_code: Option<String>,
     evo_gen: u32,
+    empirical_advisory: String,
     tx: mpsc::Sender<BotEvent>,
 ) {
     let endpoint = ollama_endpoint("/api/generate");
@@ -449,7 +499,7 @@ async fn generate_strudel_track(
 
     let scraped_context = scrape_reference_if_url(&style_ref, &client).await;
     let mut last_ast_error: Option<String> = None;
-    let mut best_fallback_code: Option<String> = None;
+    let mut last_warnings = Vec::new();
 
     for attempt in 1..=2 {
         let seed = fresh_entropy_seed().wrapping_add((attempt as u64) * 7919);
@@ -463,21 +513,21 @@ async fn generate_strudel_track(
 
         let error_feedback = match &last_ast_error {
             Some(err) => format!(
-                "\n\nCRITICAL AST/VALIDATION FEEDBACK FROM PREVIOUS PASS: {}\n\
-                 Resolve this cleanly while keeping your composition 100% original and faithful to the user's prompt.",
+                "\n\nCRITICAL AST/VALIDATION/CLONE FEEDBACK FROM PREVIOUS PASS: {}\n\
+                 Resolve this cleanly by inventing genuinely distinct melodic/rhythmic material and avoiding internal section clones.",
                 err
             ),
             None => String::new(),
         };
 
         let effective_vision = if user_prompt.trim().is_empty() {
-            "Autonomous Agentic Choice: Invent a complete, deeply expressive multi-movement composition with evolving sections, bespoke macro sliders, and visualizers."
+            "Autonomous Agentic Choice: Invent a complete, deeply expressive multi-movement composition with evolving sections, bespoke macro sliders, and inline visualizers."
         } else {
             user_prompt.as_str()
         };
 
         let effective_style = if style_ref.trim().is_empty() {
-            "Autonomous Agentic Choice: Select the ideal instrumentation, synthesis techniques, and dynamic arrangement arc."
+            "Autonomous Agentic Choice: Select the ideal instrumentation, synthesis techniques, high-contrast .color() palettes, and dynamic arrangement arc."
         } else {
             style_ref.as_str()
         };
@@ -501,7 +551,7 @@ async fn generate_strudel_track(
             None => format!(
                 "PURE AGENTIC CREATION MODE (ZERO TEMPLATES / ZERO PRESETS).\n\
                  You have full autonomous creative agency. Do not rely on stock templates or generic loops. \
-                 Design a bespoke musical architecture, custom top-level `const` slider macros, expressive melodies, harmony, bridges, and time-sequenced movements (`arrange(...)` or cycle-phrased `stack(...)`) tailored exclusively to the user's prompt and the official Strudel rules.\n\n\
+                 Design a bespoke musical architecture, custom top-level `const` slider macros, expressive melodies, harmony, bridges, inline stem visualizers (`._pianoroll()`, `._punchcard()`, `._scope()`), and time-sequenced movements tailored exclusively to the user's prompt and the official Strudel rules.\n\n\
                  {}\n\n\
                  User's Musical Vision: {}\n\
                  Style / Reference Context: {}{}{}\n\n\
@@ -520,10 +570,12 @@ async fn generate_strudel_track(
             0.72
         };
 
+        let system_prompt = get_strudel_system_prompt(&empirical_advisory);
+
         let req_body = OllamaRequest {
             model: model.clone(),
             prompt: full_prompt,
-            system: get_strudel_system_prompt(),
+            system: system_prompt,
             stream: false,
             think: false,
             options: OllamaOptions {
@@ -562,7 +614,6 @@ async fn generate_strudel_track(
                         {
                             match strudel_ast::compile_and_heal_strudel(code_text) {
                                 Ok(healed_code) => {
-                                    best_fallback_code = Some(healed_code.clone());
                                     if let Some(clone_warn) =
                                         strudel_ast::check_clone_or_stagnation(
                                             &healed_code,
@@ -570,6 +621,7 @@ async fn generate_strudel_track(
                                         )
                                     {
                                         log_diag("CLONE_REJECTED", &clone_warn);
+                                        last_warnings.push(clone_warn.clone());
                                         last_ast_error = Some(clone_warn);
                                         continue;
                                     }
@@ -581,11 +633,23 @@ async fn generate_strudel_track(
                                             seed
                                         ),
                                     );
-                                    let _ = tx.send(BotEvent::Generated(healed_code)).await;
+                                    let ast_analysis = strudel_ast::analyze_ast_health(
+                                        &healed_code,
+                                        last_warnings.clone(),
+                                        true,
+                                    );
+                                    let _ = tx
+                                        .send(BotEvent::Generated(
+                                            healed_code,
+                                            ast_analysis,
+                                            existing_code,
+                                        ))
+                                        .await;
                                     return;
                                 }
                                 Err(ast_err) => {
                                     log_diag("AST_HEAL_RETRY", &ast_err);
+                                    last_warnings.push(ast_err.clone());
                                     last_ast_error = Some(ast_err);
                                 }
                             }
@@ -612,22 +676,21 @@ async fn generate_strudel_track(
             }
             Err(e) => {
                 let _ = tx
-                    .send(BotEvent::Error(format!("Connection error to {}: {}", endpoint, e)))
+                    .send(BotEvent::Error(format!(
+                        "Connection error to {}: {}",
+                        endpoint, e
+                    )))
                     .await;
                 return;
             }
         }
     }
 
-    if let Some(valid_code) = best_fallback_code {
-        let _ = tx.send(BotEvent::Generated(valid_code)).await;
-    } else {
-        let _ = tx
-            .send(BotEvent::Error(
-                last_ast_error.unwrap_or_else(|| "Generation failed AST validation.".to_string()),
-            ))
-            .await;
-    }
+    let _ = tx
+        .send(BotEvent::Error(
+            last_ast_error.unwrap_or_else(|| "Generation rejected by clone/stagnation detector.".to_string()),
+        ))
+        .await;
 }
 
 #[tokio::main]
@@ -661,6 +724,8 @@ async fn main() -> Result<()> {
                     let preferred_idx = models
                         .iter()
                         .position(|m| m.to_lowercase().contains("32b"))
+                        .or_else(|| models.iter().position(|m| m.to_lowercase().contains("27b")))
+                        .or_else(|| models.iter().position(|m| m.to_lowercase().contains("24b")))
                         .or_else(|| models.iter().position(|m| m.to_lowercase().contains("14b")))
                         .or_else(|| models.iter().position(|m| m.to_lowercase().contains("coder")))
                         .or_else(|| models.iter().position(|m| m.to_lowercase().contains("qwen")))
@@ -675,13 +740,48 @@ async fn main() -> Result<()> {
                 BotEvent::StatusUpdate(msg) => {
                     app.status_message = msg;
                 }
-                BotEvent::Generated(code) => {
+                BotEvent::Generated(code, ast_analysis, prev_code) => {
                     app.strudel_code = code.clone();
                     if let Ok(mut guard) = app.shared_code.try_write() {
-                        *guard = code;
+                        *guard = code.clone();
                     }
                     app.is_generating = false;
                     app.scroll_offset = 0;
+
+                    let compiled_cleanly = ast_analysis.ast_compiled_cleanly;
+
+                    // Run Sonic Intelligence Autopsy & Record Experiment
+                    let autopsy_report = app.intelligence.perform_autopsy(
+                        &code,
+                        Some(&ast_analysis),
+                        prev_code.as_deref(),
+                    );
+                    match app
+                        .intelligence
+                        .record_experiment_from_autopsy(autopsy_report, app.current_model())
+                    {
+                        Ok(exp_id) => {
+                            if compiled_cleanly {
+                                let _ = app.intelligence.apply_outcome_feedback(
+                                    &exp_id,
+                                    OutcomeSignal::AstValidationPassed,
+                                    Some("AST compiled and auto-mixed cleanly."),
+                                );
+                                let _ = app.intelligence.verify_ast_backed_findings(
+                                    &exp_id,
+                                    Some("Verified by strudel_ast::analyze_ast_health"),
+                                );
+                            }
+                            log_diag(
+                                "SONIC_INTELLIGENCE_OK",
+                                &format!("Recorded experiment {}", exp_id),
+                            );
+                            app.active_experiment_id = Some(exp_id);
+                        }
+                        Err(err) => {
+                            log_diag("SONIC_INTELLIGENCE_ERR", &err);
+                        }
+                    }
 
                     let studio_url = local_studio_endpoint("/studio");
                     open_browser_url(&studio_url);
@@ -694,6 +794,13 @@ async fn main() -> Result<()> {
                 BotEvent::Error(err) => {
                     app.is_generating = false;
                     app.status_message = err;
+                    if let Some(ref exp_id) = app.active_experiment_id {
+                        let _ = app.intelligence.apply_outcome_feedback(
+                            exp_id,
+                            OutcomeSignal::TechnicalFailure,
+                            Some("Generation failed AST compilation/validation."),
+                        );
+                    }
                 }
             }
         }
@@ -717,14 +824,18 @@ async fn main() -> Result<()> {
                         app.evolution_count = 0;
                         let model = app.current_model();
                         app.status_message = format!(
-                            "Agent '{}' composing bespoke score from rules & prompt...",
+                            "Agent '{}' composing bespoke score from rules & empirical memory...",
                             model
                         );
                         let tx_clone = tx.clone();
                         let prompt = app.prompt_input.clone();
                         let style = app.style_reference.clone();
+                        let advisory = app.intelligence.build_experience_advisory(Some(&model));
                         tokio::spawn(async move {
-                            generate_strudel_track(model, prompt, style, None, 0, tx_clone).await;
+                            generate_strudel_track(
+                                model, prompt, style, None, 0, advisory, tx_clone,
+                            )
+                            .await;
                         });
                     }
                     continue;
@@ -745,14 +856,25 @@ async fn main() -> Result<()> {
                                 let tx_clone = tx.clone();
                                 let prompt = app.prompt_input.clone();
                                 let style = app.style_reference.clone();
-                                let current = if app.strudel_code.contains("[AGENTIC STANDBY]") {
+                                let current = if app.strudel_code.contains("[AGENTIC READY]") {
                                     None
                                 } else {
                                     Some(app.strudel_code.clone())
                                 };
+                                let advisory =
+                                    app.intelligence.build_experience_advisory(Some(&model));
+
+                                if let Some(ref exp_id) = app.active_experiment_id {
+                                    let _ = app.intelligence.apply_outcome_feedback(
+                                        exp_id,
+                                        OutcomeSignal::EvolutionAccepted,
+                                        Some("User accepted score for evolution."),
+                                    );
+                                }
+
                                 tokio::spawn(async move {
                                     generate_strudel_track(
-                                        model, prompt, style, current, evo_gen, tx_clone,
+                                        model, prompt, style, current, evo_gen, advisory, tx_clone,
                                     )
                                     .await;
                                 });
@@ -776,6 +898,15 @@ async fn main() -> Result<()> {
                             }
                             let studio_url = local_studio_endpoint("/studio");
                             open_browser_url(&studio_url);
+
+                            if let Some(ref exp_id) = app.active_experiment_id {
+                                let _ = app.intelligence.apply_outcome_feedback(
+                                    exp_id,
+                                    OutcomeSignal::StudioAudition,
+                                    Some("Launched Local Studio for audition."),
+                                );
+                            }
+
                             app.status_message = String::from(
                                 "Opened Local Studio with Sliders & Visualizers → Press Ctrl+Enter to play",
                             );
@@ -787,6 +918,15 @@ async fn main() -> Result<()> {
                         }
                         KeyCode::Char('s') | KeyCode::Char('S') => {
                             let _ = fs::write("masterpiece.strudel.js", &app.strudel_code);
+
+                            if let Some(ref exp_id) = app.active_experiment_id {
+                                let _ = app.intelligence.apply_outcome_feedback(
+                                    exp_id,
+                                    OutcomeSignal::PositiveEndorsement,
+                                    Some("User saved masterpiece to disk."),
+                                );
+                            }
+
                             app.status_message =
                                 String::from("Saved current song to 'masterpiece.strudel.js'!");
                             continue;
@@ -867,17 +1007,18 @@ fn ui(f: &mut Frame, app: &App) {
         .split(f.area());
 
     let model_name = app.current_model();
+    let total_exps = app.intelligence.store.total_experiments;
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " 🌀 STRUDEL FORGE v6.0 [PURE AGENTIC] ",
+            " 🌀 MOTIFAI v6.0 [PURE AGENTIC] ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("| Model: "),
         Span::styled(model_name, Style::default().fg(Color::Magenta)),
-        Span::raw(format!(" | Evo #{} | ", app.evolution_count)),
+        Span::raw(format!(" | Evo #{} | Mem: {} | ", app.evolution_count, total_exps)),
         Span::styled("[Ctrl+G / F5]", Style::default().fg(Color::Yellow)),
         Span::raw(" Compose "),
         Span::styled("[Ctrl+E]", Style::default().fg(Color::Magenta)),
