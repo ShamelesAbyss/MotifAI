@@ -1,0 +1,5 @@
+# MotifAI Architecture Exclusions
+/target/
+*.log
+Ambient Ai.js
+masterpiece.strudel.js
