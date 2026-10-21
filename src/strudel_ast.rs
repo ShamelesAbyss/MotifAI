@@ -545,81 +545,23 @@ fn all_top_level_args_are_pairs(inner: &str) -> bool {
     })
 }
 
-/// Inspects both fresh compositions and evolutions for:
-/// 1. Hardcoded legacy reference templates.
-/// 2. Internal section cloning (where distinct named movements share 100% identical trigger sets
-///    and only tweak `.gain()` or `.lpf()` multipliers).
-/// 3. Evolution stagnation (distinguishing intentional ostinato continuity from lazy repetition).
+/// Rejects only an exact unchanged score during evolution.
+///
+/// Shared motifs, identical trigger strings across sections, and repeated patterns
+/// are common musical devices. They are not sufficient evidence of cloning by
+/// themselves, so this gate does not ban particular progressions or section forms.
 pub fn check_clone_or_stagnation(new_code: &str, previous_code: Option<&str>) -> Option<String> {
-    let lower = new_code.to_lowercase();
-
-    // 1. Check banned legacy template phrases
-    let has_c_minor_cliche = lower.contains("<[c1 c2]*4 [ab0 ab1]*4 [f0 f1]*4 [g0 g1]*4>")
-        && lower.contains("c5 [eb5 g5] bb5 g5 eb5 [d5 c5] b4 <g4 d5>");
-    let has_d_minor_ref_cliche =
-        lower.contains("<[d3,f3,a3,d4] [bb2,d3,f3,a3] [g2,bb2,d3,g3] [a2,cs3,e3,g3]>/2")
-            && lower.contains("[d4 f4 a4 d5 a4 f4 e4 cs4]*2");
-
-    if has_c_minor_cliche || has_d_minor_ref_cliche {
-        return Some(
-            "CLONE DETECTED: Output contained legacy reference notes. Invent 100% original progressions, rhythms, and melodies!"
-                .to_string(),
-        );
-    }
-
-    // 2. Check internal movement cloning (applies to BOTH fresh generations and evolutions)
-    let named_sections = extract_named_section_blocks(new_code);
-    if named_sections.len() >= 2 {
-        for i in 0..named_sections.len() {
-            for j in (i + 1)..named_sections.len() {
-                let (ref name_a, ref body_a) = named_sections[i];
-                let (ref name_b, ref body_b) = named_sections[j];
-
-                // Extract the trigger sets (`note("...")`, `s("...")`, `n("...")`) inside each movement
-                let triggers_a: HashSet<String> =
-                    extract_trigger_strings(body_a).into_iter().collect();
-                let triggers_b: HashSet<String> =
-                    extract_trigger_strings(body_b).into_iter().collect();
-
-                if !triggers_a.is_empty() && triggers_a == triggers_b {
-                    return Some(format!(
-                        "INTERNAL SECTION CLONE DETECTED: Movements `{}` and `{}` contain the exact same note/rhythm patterns with only gain or filter tweaks. Give `{}` genuinely new melodic, harmonic, or rhythmic patterns!",
-                        name_a, name_b, name_b
-                    ));
-                }
-            }
-        }
-    }
-
-    // 3. Check evolution stagnation against previous score (when evolving via Ctrl+E)
-    if let Some(prev) = previous_code {
-        let new_triggers = extract_trigger_strings(new_code);
-        let prev_triggers = extract_trigger_strings(prev);
-
-        if !new_triggers.is_empty() && !prev_triggers.is_empty() {
-            let matching = new_triggers
-                .iter()
-                .filter(|t| prev_triggers.contains(t))
-                .count();
-            let ratio = matching as f32 / new_triggers.len().max(1) as f32;
-
-            let prev_sections = extract_named_section_blocks(prev).len();
-            let curr_sections = named_sections.len();
-            let added_sections = curr_sections > prev_sections;
-            let expanded_triggers = new_triggers.len() > prev_triggers.len() + 1;
-
-            if !added_sections && !expanded_triggers && ratio >= 0.85 {
-                return Some(format!(
-                    "STAGNATION DETECTED: {:.0}% of patterns remained identical to the previous score without structural or contrapuntal expansion. Evolve the harmony, introduce new counter-melodies or rhythmic transformations, or add a new movement!",
-                    ratio * 100.0
-                ));
-            }
+    if let Some(previous) = previous_code {
+        if new_code.trim() == previous.trim() {
+            return Some(
+                "EXACT EVOLUTION CLONE: The generated score is unchanged from the previous version. Make a purposeful change, or keep the original if no change is needed."
+                    .to_string(),
+            );
         }
     }
 
     None
 }
-
 /// Extracts `(section_name, section_body)` for all `const name = stack(...)` blocks.
 fn extract_named_section_blocks(code: &str) -> Vec<(String, String)> {
     let mut sections = Vec::new();
@@ -1375,6 +1317,28 @@ fn balance_global_parentheses(code: &str) -> String {
     out
 }
 
+#[cfg(test)]
+mod autonomy_regression_tests {
+    use super::*;
+
+    #[test]
+    fn recurring_motif_across_sections_is_not_automatically_rejected() {
+        let code = "setcps(0.5)\nconst intro = stack(note(\"[c4 eb4 g4]\"))\nconst drop = stack(note(\"[c4 eb4 g4]\").gain(0.8))\narrange([4, intro], [4, drop])";
+        assert_eq!(check_clone_or_stagnation(code, None), None);
+    }
+
+    #[test]
+    fn a_specific_progression_is_not_globally_banned() {
+        let code = "setcps(0.5)\nconst bass = note(\"<[c1 c2]*4 [ab0 ab1]*4 [f0 f1]*4 [g0 g1]*4>\")\nconst lead = note(\"c5 [eb5 g5] bb5 g5 eb5 [d5 c5] b4 <g4 d5>\")\nstack(bass, lead)";
+        assert_eq!(check_clone_or_stagnation(code, None), None);
+    }
+
+    #[test]
+    fn identical_evolution_is_still_rejected() {
+        let code = "setcps(0.5)\nstack(note(\"[c4 eb4 g4]\"))";
+        assert!(check_clone_or_stagnation(code, Some(code)).is_some());
+    }
+}
 pub fn validate_strudel_ast(code: &str) -> Result<(), String> {
     let has_trigger = code.contains("s(\"") || code.contains("note(\"") || code.contains("n(\"");
     if !has_trigger {

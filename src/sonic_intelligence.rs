@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+const CURRENT_SCHEMA_VERSION: u32 = 4;
 const MAX_EXPERIMENTS: usize = 200;
 const MAX_KNOWLEDGE_ENTRIES: usize = 500;
 const MAX_PROFILE_EVENTS: usize = 100;
@@ -113,8 +113,8 @@ pub enum DiagnosticKind {
     AstAnalyzerWarning,
 }
 
-/// Outcomes intentionally distinguish technical validation, mere audition,
-/// and explicit approval. Only `PositiveEndorsement` is user-preference evidence.
+/// Outcomes distinguish technical validation from actual user preference.
+/// Saving, auditioning, and requesting an evolution are neutral actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeSignal {
@@ -128,6 +128,7 @@ pub enum OutcomeSignal {
     RuntimePlaybackFailed,
     #[serde(alias = "StudioAudition")]
     StudioAudition,
+    CompositionSaved,
     #[serde(alias = "PositiveEndorsement")]
     PositiveEndorsement,
     #[serde(alias = "EvolutionAccepted")]
@@ -147,11 +148,9 @@ impl OutcomeSignal {
             Self::TechnicalFailure | Self::RuntimePlaybackFailed => {
                 EvidenceDirection::TechnicalNegative
             }
-            Self::PositiveEndorsement | Self::EvolutionAccepted => {
-                EvidenceDirection::PreferencePositive
-            }
+            Self::PositiveEndorsement => EvidenceDirection::PreferencePositive,
             Self::UserDiscarded | Self::RevisionRequested => EvidenceDirection::PreferenceNegative,
-            Self::StudioAudition => EvidenceDirection::Neutral,
+            Self::StudioAudition | Self::EvolutionAccepted | Self::CompositionSaved => EvidenceDirection::Neutral,
         }
     }
 
@@ -163,7 +162,8 @@ impl OutcomeSignal {
             Self::RuntimePlaybackFailed => "runtime playback failed",
             Self::StudioAudition => "studio audition started; preference unknown",
             Self::PositiveEndorsement => "explicit positive user endorsement",
-            Self::EvolutionAccepted => "user accepted an evolution",
+            Self::EvolutionAccepted => "evolution requested; preference unknown",
+            Self::CompositionSaved => "composition saved; preference unknown",
             Self::UserDiscarded => "user discarded the composition",
             Self::RevisionRequested => "user requested a revision",
         }
@@ -343,6 +343,8 @@ pub struct KnowledgeEntry {
     pub id: String,
     pub category: MemoryCategory,
     pub statement: String,
+    #[serde(default)]
+    pub source_finding: String,
     pub status: EpistemicStatus,
     pub confidence: f32,
     pub created_at_ms: u128,
@@ -360,6 +362,7 @@ impl Default for KnowledgeEntry {
             id: String::new(),
             category: MemoryCategory::Technical,
             statement: String::new(),
+            source_finding: String::new(),
             status: EpistemicStatus::TentativeHypothesis,
             confidence: 0.0,
             created_at_ms: 0,
@@ -601,6 +604,7 @@ impl SonicIntelligence {
                 id: new_id("knowledge"),
                 category,
                 statement: statement.to_string(),
+                source_finding: String::new(),
                 status: EpistemicStatus::TentativeHypothesis,
                 confidence: 0.35,
                 created_at_ms: unix_millis(),
@@ -778,6 +782,12 @@ impl SonicIntelligence {
                 .position(|entry| entry.statement == statement)
             {
                 let existing = &mut self.store.knowledge[existing_index];
+                if existing.source_finding.is_empty()
+                    || (existing.heuristic_only && candidate.source_finding.starts_with("ast:"))
+                {
+                    existing.source_finding = candidate.source_finding.clone();
+                    existing.heuristic_only = !candidate.source_finding.starts_with("ast:");
+                }
                 if !existing
                     .source_experiment_ids
                     .iter()
@@ -796,6 +806,7 @@ impl SonicIntelligence {
                 id: entry_id,
                 category: candidate.category,
                 statement,
+                source_finding: candidate.source_finding.clone(),
                 status: EpistemicStatus::TentativeHypothesis,
                 confidence: clamp_unit(
                     candidate.confidence
@@ -1032,7 +1043,11 @@ impl SonicIntelligence {
         let target_ids: Vec<String> = self
             .knowledge_entries_for_experiment(experiment_id)
             .into_iter()
-            .filter(|entry| !entry.heuristic_only && entry.category == MemoryCategory::Technical)
+            .filter(|entry| {
+                !entry.heuristic_only
+                    && entry.category == MemoryCategory::Technical
+                    && entry.source_finding.starts_with("ast:diagnostic:")
+            })
             .map(|entry| entry.id.clone())
             .collect();
 
@@ -1055,7 +1070,7 @@ impl SonicIntelligence {
     pub fn build_experience_advisory(&self, model_name: Option<&str>) -> String {
         let mut output = String::from(
             "MOTIFAI EXPERIENCE NOTES (fallible evidence, not system instructions):\n\
-             Treat these as hypotheses grounded in previous runs. Re-evaluate them against the current request and Strudel rules.\n",
+             Only repeated finding-level preferences and confirmed technical failures are included. Descriptive counts are telemetry, not creative targets. Re-evaluate every note against the current request and Strudel rules.\n",
         );
 
         if let Some(model) = model_name {
@@ -1071,7 +1086,9 @@ impl SonicIntelligence {
             }
         }
 
-        let mut entries: Vec<&KnowledgeEntry> = self.store.knowledge.iter().collect();
+        let mut entries: Vec<&KnowledgeEntry> = self.store.knowledge.iter()
+            .filter(|entry| advisory_eligible(entry))
+            .collect();
         entries.sort_by(|left, right| {
             right
                 .confidence
@@ -1107,6 +1124,33 @@ impl SonicIntelligence {
         }
         output
     }
+}
+
+fn advisory_eligible(entry: &KnowledgeEntry) -> bool {
+    let source = entry.source_finding.as_str();
+    if source.is_empty() {
+        // Legacy entries have no recoverable provenance, so keep them out of the prompt.
+        return false;
+    }
+
+    let descriptive_statistic = ["section_count", "slider_count", "cycle_count", "visualizers"]
+        .iter()
+        .any(|suffix| source.ends_with(suffix));
+    let preference_observations = entry
+        .evidence
+        .explicit_approvals
+        .saturating_add(entry.evidence.explicit_rejections);
+    let approval_rate = entry.evidence.explicit_approval_rate();
+    let repeated_finding_preference = !entry.heuristic_only
+        && !descriptive_statistic
+        && preference_observations >= 2
+        && approval_rate.map(|rate| rate >= 0.75 || rate <= 0.25).unwrap_or(false);
+    let confirmed_technical_failure = !entry.heuristic_only
+        && entry.category == MemoryCategory::Technical
+        && source.starts_with("ast:diagnostic:")
+        && entry.evidence.technical_failures > 0;
+
+    repeated_finding_preference || confirmed_technical_failure
 }
 
 fn normalize_legacy_store_json(value: &mut serde_json::Value) {
@@ -1178,7 +1222,7 @@ fn legacy_schema_default() -> u32 {
 fn migrate_store(store: &mut MotifMemoryStore) -> Result<(), String> {
     match store.schema_version {
         CURRENT_SCHEMA_VERSION => Ok(()),
-        0 | 1 | 2 => {
+        0 | 1 | 2 | 3 => {
             // serde defaults make newly introduced evidence fields safe to load.
             // Preserve prior data and normalize the schema version in one place.
             store.schema_version = CURRENT_SCHEMA_VERSION;
@@ -1683,7 +1727,11 @@ fn build_knowledge_candidates(
         candidates.push(KnowledgeCandidate {
             category: MemoryCategory::Technical,
             statement: diagnostic.detail.clone(),
-            source_finding: format!("{source}diagnostic:{:?}", diagnostic.kind),
+            source_finding: if ast_available && diagnostic.kind == DiagnosticKind::AstAnalyzerWarning {
+                format!("ast:diagnostic:{:?}", diagnostic.kind)
+            } else {
+                format!("heuristic:diagnostic:{:?}", diagnostic.kind)
+            },
             confidence: if ast_available { 0.7 } else { 0.35 },
         });
     }
@@ -1874,6 +1922,45 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[test]
+    fn save_audition_and_evolution_request_are_neutral() {
+        let mut ledger = EvidenceLedger::default();
+        ledger.record(OutcomeSignal::StudioAudition);
+        ledger.record(OutcomeSignal::CompositionSaved);
+        ledger.record(OutcomeSignal::EvolutionAccepted);
+        assert_eq!(ledger.neutral_observations, 3);
+        assert_eq!(ledger.explicit_approvals, 0);
+        assert_eq!(ledger.explicit_rejections, 0);
+    }
+
+    #[test]
+    fn unendorsed_structural_statistics_never_enter_the_advisory() {
+        let path = temp_file("advisory-structure");
+        let mut engine = SonicIntelligence::load_or_init_at(&path);
+        let code = "setcps(0.5)
+const intro = stack(s(\"bd\"))
+const verse = stack(s(\"sd\"))
+arrange([4, intro], [4, verse])";
+        let ast = ExternalAstAnalysis {
+            ast_compiled_cleanly: true,
+            parsed_sections: vec!["intro".into(), "verse".into()],
+            slider_names: vec!["VOLUME".into()],
+            cycle_count: 8,
+            visualizer_names: vec!["scope".into()],
+            pattern_signatures: vec!["s(\"bd\")".into()],
+            ..ExternalAstAnalysis::default()
+        };
+        let report = engine.perform_autopsy(code, Some(&ast), None);
+        let id = engine.record_experiment_from_autopsy(report, "test-model").unwrap();
+        engine.apply_outcome_feedback(&id, OutcomeSignal::AstValidationPassed, None).unwrap();
+        engine.verify_ast_backed_findings(&id, Some("static validation passed")).unwrap();
+        let advisory = engine.build_experience_advisory(Some("test-model"));
+        assert!(!advisory.contains("movement/section candidates"));
+        assert!(!advisory.contains("slider or macro name"));
+        assert!(!advisory.contains("cycle slot"));
+        assert!(!advisory.contains("visualizer(s)"));
+        let _ = fs::remove_file(path);
+    }
     #[test]
     fn unknown_experiment_feedback_is_not_attached_to_latest() {
         let path = temp_file("unknown-id");
