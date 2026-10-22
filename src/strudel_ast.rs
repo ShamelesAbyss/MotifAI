@@ -95,7 +95,7 @@ pub fn analyze_ast_health(
         }
         if identifier_has_arithmetic_or_comparison_use(&masked, name) {
             warnings.push(format!(
-                "Slider '{name}' participates in JavaScript arithmetic/comparison. Verify its runtime return type; use Strudel pattern operators when it returns a Pattern."
+                "Slider '{name}' participates in JavaScript arithmetic/comparison. The Strudel REPL transpiles slider(...) into a Pattern-valued numeric control; pass it directly to a parameter or use Strudel pattern methods such as .mul(...), .add(...), or .range(...) as appropriate."
             ));
         }
     }
@@ -134,6 +134,7 @@ pub fn validate_strudel_ast(code: &str) -> Result<(), String> {
     validate_mini_notation_delimiters(code)?;
     reject_standalone_weighted_filter_values(code)?;
     reject_unquoted_numeric_notation_candidates(&masked)?;
+    reject_javascript_slider_arithmetic(&masked)?;
 
     if !contains_trigger_call(&masked) {
         return Err(
@@ -1112,6 +1113,24 @@ enum LexState {
     BlockComment,
 }
 
+/// Rejects a high-confidence silent-output hazard: treating a standard Strudel
+/// `slider(...)` control as a plain JavaScript number. In the REPL, slider calls
+/// are transpiled into pattern-valued numeric controls, so JavaScript operators
+/// such as `cutoff * 0.8` or `intensity > 0.7 ? ...` can escape Strudel's pattern
+/// algebra and produce invalid parameter values. Returning an error causes the
+/// existing generation loop to retry with specific feedback instead of accepting
+/// a structurally balanced but potentially silent score.
+fn reject_javascript_slider_arithmetic(masked_code: &str) -> Result<(), String> {
+    for name in extract_slider_names(masked_code) {
+        if identifier_has_arithmetic_or_comparison_use(masked_code, &name) {
+            return Err(format!(
+                "Strudel preflight failed: slider '{name}' is used with ordinary JavaScript arithmetic or comparison. In the Strudel REPL, slider(...) is transpiled to a Pattern-valued numeric control; expressions such as '{name} * 0.8' or '{name} > 0.7 ? ...' can break the parameter signal and may silence the composition. Pass the slider directly to a parameter, or use Strudel pattern methods such as .mul(...), .add(...), or .range(...) where their input range fits the intended units. Replace threshold-based JavaScript ternaries with a supported pattern-aware design, or simplify to a directly controlled parameter."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn extract_slider_names(masked_code: &str) -> Vec<String> {
     let mut output = Vec::new();
     for line in masked_code.lines() {
@@ -1620,12 +1639,27 @@ mod autonomy_regression_tests {
     }
 
     #[test]
-    fn slider_expression_is_preserved_and_diagnosed_not_rewritten() {
+    fn direct_slider_parameter_is_preserved_and_accepted() {
         let code = "setcps(0.5)\nconst level = slider(0.4, 0, 1, 0.05)\nstack(note(\"c3 e3\").gain(level))";
         let result = compile_and_heal_strudel(code).unwrap();
         assert!(result.contains("slider(0.4, 0, 1, 0.05)"));
         let analysis = analyze_ast_health(&result, Vec::new(), true);
         assert_eq!(analysis.slider_names, vec!["level"]);
+    }
+
+    #[test]
+    fn slider_javascript_arithmetic_is_rejected_before_generation_is_accepted() {
+        let code = "setcps(0.5)\nconst intensity = slider(0.5, 0, 1)\nconst leadCutoff = slider(800, 200, 4000)\nconst lead = note(\"c4 eb4 g4\").lpf(leadCutoff * intensity).gain(intensity > 0.7 ? 1 : 0.4)\nlead";
+        let error = compile_and_heal_strudel(code).unwrap_err();
+        assert!(error.contains("slider 'intensity'") || error.contains("slider 'leadCutoff'"));
+        assert!(error.contains("Pattern-valued numeric control"));
+        assert!(error.contains(".mul(...)"));
+    }
+
+    #[test]
+    fn slider_pattern_methods_are_not_mistaken_for_javascript_arithmetic() {
+        let code = "setcps(0.5)\nconst cutoff = slider(0.5, 0, 1)\nconst lead = note(\"c4 eb4 g4\").lpf(cutoff.range(200, 4000))\nlead";
+        assert!(compile_and_heal_strudel(code).is_ok());
     }
 
     #[test]

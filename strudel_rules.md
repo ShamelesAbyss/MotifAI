@@ -1,10 +1,10 @@
 # MOTIFAI // STRUDEL COMPOSITION, SYNTAX & RUNTIME CONTRACT
 
-**Version:** 2.2.1  
+**Version:** 2.2.2  
 **Reviewed:** 2026-10-22  
 **Purpose:** Give MotifAI a deep, extensible working reference for writing, evolving, and debugging executable Strudel compositions. This document describes the structures and tools available to the composer without prescribing one arrangement, genre formula, instrument count, macro set, or section count.
 
-**v2.2.1 additions:** Explicitly distinguishes mini-notation weight syntax from numeric DSP parameters, documents the invalid `lpf("@200")` pattern and its fixed-cutoff/dynamic-pattern alternatives, and aligns preflight repair behavior with this distinction. Retains the v2.2.0 recipe, metadata, and sample-system additions.
+**v2.2.2 additions:** Treats standard Strudel REPL sliders as pattern-valued controls, forbids ordinary JavaScript arithmetic/comparisons on slider variables, and aligns semantic preflight with the existing retry loop so likely silent-output hazards are rejected before a score is accepted. Retains the v2.2.1 filter-cutoff repair and the v2.2.0 recipe, metadata, and sample-system additions.
 
 > **Governing principle:** Structure is a language of possibilities, not a song template. Learn the time model, syntax, pattern algebra, sound sources, and control systems well enough to choose the structure that serves the brief. Do not turn this document into a checklist that every song must visibly demonstrate.
 
@@ -450,7 +450,11 @@ These are optional capabilities. They are not required to make a valid compositi
 ### Sliders and controls
 
 - Use `slider(...)` only when the MotifAI UI/runtime actually defines it and the user, orchestration, or performance concept calls for interactive controls.
-- Verify the helper's argument order, default behavior, return type, supported operations, and how the UI binds its value. Never assume the result is either a plain JavaScript number or a Strudel `Pattern` without checking.
+- For the standard Strudel REPL transpiler used by MotifAI's embedded editor, `slider(...)` is transpiled into a Pattern-valued numeric control. Treat it as a Strudel pattern, not a plain JavaScript number. If MotifAI later adds a different slider adapter, document and test that adapter explicitly.
+- Never use ordinary JavaScript arithmetic or comparisons on a slider variable: avoid expressions such as `cutoff * 0.8`, `cutoff * intensity`, `intensity > 0.7`, or `intensity > 0.7 ? 1 : 0.4`. These can produce non-pattern/invalid parameter values and may silence a full composition when applied to a shared/master chain.
+- Pass a slider directly to the parameter it controls, such as `.lpf(leadCutoff)` or `.gain(intensity)`. When genuine scaling is needed, use Strudel pattern methods such as `.mul(...)`, `.add(...)`, `.range(...)`, or `.rangex(...)` only when the input domain and desired units are understood. A slider whose min/max already represent cutoff hertz should generally be passed directly to `.lpf(...)`; do not normalize/rescale it again without a reason.
+- Do not use an ordinary JavaScript ternary to turn a slider into a threshold-triggered drop. Use a supported pattern-aware design with verified semantics, or keep the control continuous by mapping it directly to gain, density, cutoff, or another parameter.
+- Preflight rejects detected arithmetic/comparison operators applied directly to declared slider variables. This is a narrow, high-confidence semantic guard that feeds the existing model retry loop; it is not a full type checker and does not replace runtime evaluation.
 - Give each control a musical purpose, a sensible value range, and a default within that range. Match the output units to the receiving parameter.
 - Every declared control must reach at least one intended audible parameter and visibly/audibly change when manipulated. A declared but unwired control is a defect.
 - Use a small number of high-value controls rather than automatically generating 5 to 8 sliders for every score. Add no slider if the piece does not benefit from live performance control.
@@ -636,6 +640,7 @@ When a score fails or sounds wrong, classify the symptom before modifying it. Do
 - **Mini-notation parser reports `@` inside a filter value:** Check for malformed standalone strings such as `.lpf("@200")`. The `@` symbol is a temporal weight operator attached to an event, not a numeric cutoff prefix. Use `.lpf(200)` for a fixed cutoff or `.lpf("<200 400 800>")` for event-stepped cutoff changes. The current AST preflight narrowly normalizes this exact malformed scalar form to the fixed numeric value; it does not infer or invent a moving filter curve.
 - **Excessive loudness or muddiness:** Inspect duplicate layers, orbit sends, delay feedback, summed gain, low-frequency overlap, and effect tails before adding more compression or raising gain.
 - **A slider does nothing:** Trace the control from UI declaration through its actual type/value to the sound parameter. Do not assume it works because it has a name.
+- **A slider expression risks silence:** Reject JavaScript arithmetic/comparison involving a slider, return the specific preflight message to the model, and retry with direct parameter use or documented pattern algebra. Do not silently auto-rewrite a creative expression.
 - **A visualizer is blank or misleading:** Check whether the chosen visual is global or inline, whether it appears before/after relevant transformations, whether the pattern carries pitch/event data appropriate to that visual, and whether the embedding supports its hook.
 - **A sound name is unknown or silent:** Confirm that it exists in the active sound map. Do not try to repair a missing source by blindly adding a bank prefix, switching to a synth name, or inventing a registration call.
 - **Prompt bloat / overbuilt code:** Remove unnecessary sections, effects, controls, visualizers, and duplicated stems. Do not shrink the rulebook's vocabulary into a mandatory song template.
