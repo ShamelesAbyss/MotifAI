@@ -1,0 +1,57 @@
+[
+  {
+    "id": "mini-notation-polyrhythm-layering",
+    "category": "mini-notation",
+    "relevance_tags": ["rhythm", "polyphony", "mini-notation", "layers"],
+    "musical_purpose": "Layer independent rhythms or chord voices within a single step using comma-separated notation.",
+    "compact_example": "note(\"[c3,eb3,g3] [f3,a3,c4]\")",
+    "compatibility_notes": "Standard Strudel mini-notation parser.",
+    "source_url": "https://strudel.cc/learn/mini-notation/",
+    "provenance": "Official Strudel Documentation",
+    "verification_status": "official-documented"
+  },
+  {
+    "id": "drum-programming-tr909-breaks",
+    "category": "drum-programming",
+    "relevance_tags": ["drums", "beats", "roland", "tr909", "break"],
+    "musical_purpose": "Program an authentic electronic rhythm using classic Roland sample banks with structural masking.",
+    "compact_example": "s(\"bd*4, ~ sd ~ sd, hh*16\").bank(\"RolandTR909\").shape(0.35)",
+    "compatibility_notes": "Requires sample bank access in browser or local container.",
+    "source_url": "https://strudel.cc/learn/samples/",
+    "provenance": "Official Strudel Examples",
+    "verification_status": "official-documented"
+  },
+  {
+    "id": "bass-design-acid-filter",
+    "category": "bass-design",
+    "relevance_tags": ["bass", "acid", "filter", "resonance", "sawtooth"],
+    "musical_purpose": "Design a driving electronic bassline using low-pass filters, high resonance, and saturation.",
+    "compact_example": "note(\"<[c1 c2]*4>\").s(\"sawtooth\").lpf(1200).lpq(6.0).shape(0.4)",
+    "compatibility_notes": "Standard DSP audio node processing.",
+    "source_url": "https://strudel.cc/learn/effects/",
+    "provenance": "Community Standard Practice",
+    "verification_status": "official-documented"
+  },
+  {
+    "id": "effects-space-orbit",
+    "category": "effects",
+    "relevance_tags": ["reverb", "delay", "orbit", "spatial", "mixing"],
+    "musical_purpose": "Isolate time-based effects onto distinct audio buses to prevent mix muddying.",
+    "compact_example": ".room(0.75).size(3.5).delay(0.3).orbit(2)",
+    "compatibility_notes": "Orbit routing is fully supported in Strudel audio architecture.",
+    "source_url": "https://strudel.cc/learn/effects/",
+    "provenance": "Official Strudel Documentation",
+    "verification_status": "official-documented"
+  },
+  {
+    "id": "modulation-euclidean-rhythms",
+    "category": "modulation",
+    "relevance_tags": ["euclidean", "rhythm", "patterns", "generator"],
+    "musical_purpose": "Generate mathematically distributed rhythmic accents across cycles.",
+    "compact_example": "s(\"bd(3,8)\").bank(\"RolandTR808\")",
+    "compatibility_notes": "Standard mini-notation pattern generator.",
+    "source_url": "https://strudel.cc/learn/mini-notation/#euclidean-rhythms",
+    "provenance": "Official Strudel Documentation",
+    "verification_status": "official-documented"
+  }
+]

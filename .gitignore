@@ -1,9 +1,12 @@
 # MotifAI Architecture Exclusions
 /target/
 *.log
+*.ps1
 Ambient Ai.js
 masterpiece.strudel.js
 motif_memory.json
+/strudel_production_library.json
 *.bak
 *.corrupt.*
 .DS_Store
+knowledge/golden_tracks/
