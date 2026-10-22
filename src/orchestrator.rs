@@ -35,120 +35,53 @@ impl ScaleMode {
     }
 }
 
-/// Detects the dominant tonic pitch class (0..11) and scale mode from the code and user prompt.
-/// Weights low-octave bass notes (octaves 0..=2) 6x higher than upper voices so a passing melody
-/// note does not override the piece's tonal center.
+/// Detects the dominant tonic pitch class (0..11) and scale mode from existing code and prompt hints.
+/// Explicit prompt/code scale declarations take priority, followed by a bass-weighted pitch histogram.
 pub fn detect_scale_context(code: &str, prompt_hint: &str) -> (u8, ScaleMode) {
-    let lower_code = code.to_lowercase();
-    let lower_hint = prompt_hint.to_lowercase();
+    let (prompt_root, prompt_mode) = infer_prompt_key_and_mode(prompt_hint);
 
-    // 1. Check if code explicitly declares `.scale("root:mode")`
-    if let Some(pos) = lower_code.find(".scale(\"") {
-        let after = &lower_code[pos + 8..];
-        if let Some(end_q) = after.find('"') {
-            let scale_str = &after[..end_q];
-            if let Some((root_s, mode_s)) = scale_str.split_once(':') {
-                let pc = parse_pitch_class_only(root_s.trim()).unwrap_or(2);
-                let mode = if mode_s.contains("harmonic") {
-                    ScaleMode::HarmonicMinor
-                } else if mode_s.contains("dorian") {
-                    ScaleMode::Dorian
-                } else if mode_s.contains("phrygian") {
-                    ScaleMode::PhrygianDominant
-                } else if mode_s.contains("lydian") {
-                    ScaleMode::Lydian
-                } else if mode_s.contains("melodic") {
-                    ScaleMode::MelodicMinor
-                } else if mode_s.contains("major") || mode_s.contains("ionian") {
-                    ScaleMode::Major
-                } else {
-                    ScaleMode::NaturalMinor
-                };
-                return (pc, mode);
-            }
-        }
+    // 1. Check if the code explicitly declares `.scale("root:mode")` or `.scale('root:mode')`
+    if let Some((code_root, code_mode)) = extract_explicit_scale_call(code) {
+        return (
+            prompt_root.unwrap_or(code_root),
+            prompt_mode.unwrap_or(code_mode),
+        );
     }
 
-    // 2. Infer mode from prompt or comments inside code
-    let combined_text = format!("{} {}", lower_hint, lower_code);
-    let mode = if combined_text.contains("harmonic minor")
-        || combined_text.contains("symphon")
-        || combined_text.contains("orchestra")
-        || combined_text.contains("classical")
-        || combined_text.contains("baroque")
-        || combined_text.contains("requiem")
-        || combined_text.contains("choir")
-    {
-        ScaleMode::HarmonicMinor
-    } else if combined_text.contains("phrygian")
-        || combined_text.contains("dubstep")
-        || combined_text.contains("growl")
-        || combined_text.contains("industrial")
-        || combined_text.contains("boss")
-    {
-        ScaleMode::PhrygianDominant
-    } else if combined_text.contains("lydian")
-        || combined_text.contains("astral")
-        || combined_text.contains("celestial")
-        || combined_text.contains("cosmic")
-        || combined_text.contains("dream")
-    {
-        ScaleMode::Lydian
-    } else if combined_text.contains("dorian")
-        || combined_text.contains("daft")
-        || combined_text.contains("french house")
-        || combined_text.contains("funk")
-        || combined_text.contains("deep house")
-        || combined_text.contains("groove")
-    {
-        ScaleMode::Dorian
-    } else if combined_text.contains("melodic minor") || combined_text.contains("jazz") {
-        ScaleMode::MelodicMinor
-    } else if combined_text.contains("major")
-        || combined_text.contains("uplifting")
-        || combined_text.contains("triumphant")
-        || combined_text.contains("euphoric")
-    {
-        ScaleMode::Major
-    } else {
-        ScaleMode::NaturalMinor
-    };
+    // 2. Determine mode from prompt first, then code comments/keywords, defaulting to NaturalMinor
+    let mode = prompt_mode
+        .or_else(|| infer_mode_from_text(code))
+        .unwrap_or(ScaleMode::NaturalMinor);
 
-    // 3. Weighted histogram of pitch classes in `note("...")`, favoring bass octaves (0, 1, 2)
+    if let Some(explicit_root) = prompt_root {
+        return (explicit_root, mode);
+    }
+
+    // 3. Weighted histogram of pitch classes in `note("...")` / `note('...')`, favoring bass octaves (0..=2)
     let mut weights = [0u32; 12];
     let mut first_bass_pc: Option<u8> = None;
 
     for line in code.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("//") || trimmed.contains("s(\"cb\")") {
+        if trimmed.starts_with("//") || trimmed.contains("s(\"cb\")") || trimmed.contains("s('cb')") {
             continue;
         }
-        let mut search_idx = 0;
-        while let Some(pos) = trimmed[search_idx..].find("note(\"") {
-            let start = search_idx + pos + 6;
-            if let Some(end_q) = trimmed[start..].find('"') {
-                let note_str = &trimmed[start..start + end_q];
-                for token in note_str.split(|c: char| !c.is_ascii_alphanumeric() && c != '#') {
-                    if let Some((pc, oct, _)) = parse_pitch_token(token) {
-                        if oct <= 2 {
-                            if first_bass_pc.is_none() {
-                                first_bass_pc = Some(pc);
-                            }
-                            weights[pc as usize] += 6;
-                        } else {
-                            weights[pc as usize] += 1;
+        for note_str in extract_note_call_strings(trimmed) {
+            for token in note_str.split(|c: char| !c.is_ascii_alphanumeric() && c != '#') {
+                if let Some((pc, oct, _)) = parse_pitch_token(token) {
+                    if oct <= 2 {
+                        if first_bass_pc.is_none() {
+                            first_bass_pc = Some(pc);
+                            // Give the opening bass root a tie-breaker bonus without discarding the histogram
+                            weights[pc as usize] += 4;
                         }
+                        weights[pc as usize] += 6;
+                    } else {
+                        weights[pc as usize] += 1;
                     }
                 }
-                search_idx = start + end_q + 1;
-            } else {
-                break;
             }
         }
-    }
-
-    if let Some(bass_pc) = first_bass_pc {
-        return (bass_pc, mode);
     }
 
     let best_pc = weights
@@ -157,9 +90,190 @@ pub fn detect_scale_context(code: &str, prompt_hint: &str) -> (u8, ScaleMode) {
         .max_by_key(|(_, &w)| w)
         .filter(|(_, &w)| w > 0)
         .map(|(pc, _)| pc as u8)
+        .or(first_bass_pc)
         .unwrap_or(2);
 
     (best_pc, mode)
+}
+
+fn extract_explicit_scale_call(code: &str) -> Option<(u8, ScaleMode)> {
+    let lower_code = code.to_lowercase();
+    let pos = lower_code.find(".scale(")?;
+    let after = &lower_code[pos + ".scale(".len()..];
+    let quote_pos = after.find(|c| c == '"' || c == '\'')?;
+    let quote_char = after[quote_pos..].chars().next()?;
+    let rest = &after[quote_pos + quote_char.len_utf8()..];
+    let end_q = rest.find(quote_char)?;
+    let scale_str = &rest[..end_q];
+
+    let (root_s, mode_s) = scale_str.split_once(':')?;
+    let pc = parse_pitch_class_only(root_s.trim())?;
+    let mode = parse_mode_keyword(mode_s).unwrap_or(ScaleMode::NaturalMinor);
+    Some((pc, mode))
+}
+
+fn extract_note_call_strings(line: &str) -> Vec<&str> {
+    let mut results = Vec::new();
+    let mut search_idx = 0usize;
+
+    while let Some(rel) = line[search_idx..].find("note(") {
+        let start_args = search_idx + rel + "note(".len();
+        let tail = &line[start_args..];
+        let Some(q_rel) = tail.find(|c| c == '"' || c == '\'') else {
+            break;
+        };
+        let quote = tail[q_rel..].chars().next().unwrap_or('"');
+        let content_start = start_args + q_rel + quote.len_utf8();
+        let content_tail = &line[content_start..];
+        if let Some(end_rel) = content_tail.find(quote) {
+            results.push(&content_tail[..end_rel]);
+            search_idx = content_start + end_rel + quote.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    results
+}
+
+/// Parses explicit key and mode requests from user prompt text (e.g. "in F# minor", "Eb dorian", "Key of C major").
+pub fn infer_prompt_key_and_mode(text: &str) -> (Option<u8>, Option<ScaleMode>) {
+    let lower = text.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '#')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mode_words = [
+        "minor", "major", "dorian", "phrygian", "lydian", "aeolian", "ionian", "harmonic",
+        "melodic",
+    ];
+
+    let mut detected_root: Option<u8> = None;
+
+    for i in 0..tokens.len() {
+        let candidate = tokens[i];
+
+        // Case 1: Pitch token immediately followed by a mode keyword (e.g., "f# minor", "eb dorian", "c# harmonic minor")
+        if let Some(pc) = parse_pitch_class_token_strict(candidate) {
+            if let Some(&next_word) = tokens.get(i + 1) {
+                if mode_words.contains(&next_word) {
+                    detected_root = Some(pc);
+                    break;
+                }
+            }
+            // Case 2: Preceded by "key of <pitch>" or "in <pitch>" when unambiguously a musical key
+            if i >= 2 && tokens[i - 2] == "key" && tokens[i - 1] == "of" {
+                detected_root = Some(pc);
+                break;
+            }
+            if i >= 1 && tokens[i - 1] == "key" {
+                detected_root = Some(pc);
+                break;
+            }
+        }
+    }
+
+    let detected_mode = infer_mode_from_text(&lower);
+    (detected_root, detected_mode)
+}
+
+fn parse_mode_keyword(text: &str) -> Option<ScaleMode> {
+    let lower = text.to_lowercase();
+    if lower.contains("harmonic") {
+        Some(ScaleMode::HarmonicMinor)
+    } else if lower.contains("melodic") {
+        Some(ScaleMode::MelodicMinor)
+    } else if lower.contains("phrygian") {
+        Some(ScaleMode::PhrygianDominant)
+    } else if lower.contains("lydian") {
+        Some(ScaleMode::Lydian)
+    } else if lower.contains("dorian") {
+        Some(ScaleMode::Dorian)
+    } else if lower.contains("major") || lower.contains("ionian") {
+        Some(ScaleMode::Major)
+    } else if lower.contains("minor") || lower.contains("aeolian") {
+        Some(ScaleMode::NaturalMinor)
+    } else {
+        None
+    }
+}
+
+fn infer_mode_from_text(text: &str) -> Option<ScaleMode> {
+    let lower = text.to_lowercase();
+    if lower.contains("harmonic minor")
+        || lower.contains("symphon")
+        || lower.contains("orchestra")
+        || lower.contains("classical")
+        || lower.contains("baroque")
+        || lower.contains("requiem")
+        || lower.contains("choir")
+    {
+        Some(ScaleMode::HarmonicMinor)
+    } else if lower.contains("phrygian")
+        || lower.contains("dubstep")
+        || lower.contains("growl")
+        || lower.contains("industrial")
+        || lower.contains("boss")
+    {
+        Some(ScaleMode::PhrygianDominant)
+    } else if lower.contains("lydian")
+        || lower.contains("astral")
+        || lower.contains("celestial")
+        || lower.contains("cosmic")
+        || lower.contains("dream")
+    {
+        Some(ScaleMode::Lydian)
+    } else if lower.contains("dorian")
+        || lower.contains("daft")
+        || lower.contains("french house")
+        || lower.contains("funk")
+        || lower.contains("deep house")
+        || lower.contains("groove")
+    {
+        Some(ScaleMode::Dorian)
+    } else if lower.contains("melodic minor") || lower.contains("jazz") {
+        Some(ScaleMode::MelodicMinor)
+    } else if lower.contains("major")
+        || lower.contains("ionian")
+        || lower.contains("uplifting")
+        || lower.contains("triumphant")
+        || lower.contains("euphoric")
+    {
+        Some(ScaleMode::Major)
+    } else if lower.contains("natural minor")
+        || lower.contains("aeolian")
+        || lower.contains("minor")
+    {
+        Some(ScaleMode::NaturalMinor)
+    } else {
+        None
+    }
+}
+
+fn parse_pitch_class_token_strict(s: &str) -> Option<u8> {
+    if s.is_empty() || s.len() > 2 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let base: i32 = match (bytes[0] as char).to_ascii_lowercase() {
+        'c' => 0,
+        'd' => 2,
+        'e' => 4,
+        'f' => 5,
+        'g' => 7,
+        'a' => 9,
+        'b' => 11,
+        _ => return None,
+    };
+    if bytes.len() == 1 {
+        return Some(base as u8);
+    }
+    match (bytes[1] as char).to_ascii_lowercase() {
+        's' | '#' => Some(((base + 1) % 12) as u8),
+        'b' => Some(((base + 11) % 12) as u8),
+        _ => None,
+    }
 }
 
 fn parse_pitch_class_only(s: &str) -> Option<u8> {
@@ -230,8 +344,42 @@ pub fn parse_pitch_token(token: &str) -> Option<(u8, i32, bool)> {
     }
 }
 
-pub fn format_pitch_class(pc: u8, tonic_pc: u8, oct: i32) -> String {
-    let use_sharps = matches!(tonic_pc % 12, 4 | 6 | 9 | 11 | 1 | 2);
+/// Determines whether a pitch class should be spelled with sharps (`cs`, `fs`) or flats (`db`, `eb`)
+/// based on both the tonic pitch class and the active `ScaleMode`.
+fn use_sharps_for_scale(pc: u8, tonic_pc: u8, mode: ScaleMode) -> bool {
+    let t = tonic_pc % 12;
+    let p = pc % 12;
+
+    // Raised 7th leading tone in Harmonic Minor / Melodic Minor (e.g. F# in G minor, C# in D minor)
+    if matches!(mode, ScaleMode::HarmonicMinor | ScaleMode::MelodicMinor)
+        && p == (t + 11) % 12
+        && matches!(p, 1 | 3 | 6 | 8 | 10)
+    {
+        return true;
+    }
+
+    match mode {
+        ScaleMode::Major | ScaleMode::Lydian => {
+            // Major/Lydian keys using sharps: C(0 -> Lydian F#), G(7), D(2), A(9), E(4), B(11), F#(6), C#(1)
+            matches!(t, 0 | 7 | 2 | 9 | 4 | 11 | 6 | 1)
+        }
+        ScaleMode::Dorian => {
+            // Dorian keys using sharps: A(9), E(4), B(11), F#(6), C#(1), G#(8)
+            matches!(t, 9 | 4 | 11 | 6 | 1 | 8)
+        }
+        ScaleMode::NaturalMinor | ScaleMode::HarmonicMinor | ScaleMode::MelodicMinor => {
+            // Minor keys using sharps: E(4), B(11), F#(6), C#(1), G#(8), D#(3)
+            matches!(t, 4 | 11 | 6 | 1 | 8 | 3)
+        }
+        ScaleMode::PhrygianDominant => {
+            // Phrygian Dominant has a flat-2 and major-3; sharp tonics use sharps
+            matches!(t, 4 | 11 | 6 | 1 | 8 | 3 | 9)
+        }
+    }
+}
+
+pub fn format_pitch_class_in_mode(pc: u8, tonic_pc: u8, mode: ScaleMode, oct: i32) -> String {
+    let use_sharps = use_sharps_for_scale(pc, tonic_pc, mode);
     let name = match (pc % 12, use_sharps) {
         (0, _) => "c",
         (1, true) => "cs",
@@ -255,62 +403,6 @@ pub fn format_pitch_class(pc: u8, tonic_pc: u8, oct: i32) -> String {
     format!("{}{}", name, oct.clamp(0, 7))
 }
 
-/// Normalizes `#` accidentals into Strudel-safe `s` spelling (e.g. `f#3!2` -> `fs3!2`)
-/// WITHOUT snapping or altering the composer's chosen pitch class!
-pub fn normalize_pitch_spelling(token: &str, tonic_pc: u8) -> String {
-    for sep in ['!', '*', '@', '/'] {
-        if let Some(idx) = token.find(sep) {
-            let (note_part, suffix) = token.split_at(idx);
-            return format!("{}{}", normalize_pitch_spelling(note_part, tonic_pc), suffix);
-        }
-    }
-
-    let Some((pc, oct, _)) = parse_pitch_token(token) else {
-        return token.to_string();
-    };
-
-    format_pitch_class(pc, tonic_pc, oct)
-}
-
-/// Quantizes a single note token to `(tonic_pc, mode)` when explicit diatonic snapping is requested.
-pub fn quantize_pitch_token(token: &str, tonic_pc: u8, mode: ScaleMode) -> String {
-    for sep in ['!', '*', '@', '/'] {
-        if let Some(idx) = token.find(sep) {
-            let (note_part, suffix) = token.split_at(idx);
-            return format!(
-                "{}{}",
-                quantize_pitch_token(note_part, tonic_pc, mode),
-                suffix
-            );
-        }
-    }
-
-    let Some((pc, oct, _)) = parse_pitch_token(token) else {
-        return token.to_string();
-    };
-
-    let intervals = mode.intervals();
-    let rel = (pc + 12 - (tonic_pc % 12)) % 12;
-
-    let snapped_rel = if intervals.contains(&rel) {
-        rel
-    } else {
-        intervals
-            .iter()
-            .copied()
-            .min_by_key(|&deg| {
-                let diff = (deg as i32 - rel as i32).abs();
-                diff.min(12 - diff)
-            })
-            .unwrap_or(0)
-    };
-
-    let final_pc = (tonic_pc + snapped_rel) % 12;
-    format_pitch_class(final_pc, tonic_pc, oct)
-}
-
-/// Given a root note `(pc, oct)`, builds a tertian chord (`[root, 3rd, 5th, 7th]`)
-/// inside `(tonic_pc, mode)` to rescue accidental semitone cluster collisions like `[a3,b3,c4,d4]`.
 fn build_tertian_chord_from_root(
     root_pc: u8,
     root_oct: i32,
@@ -343,264 +435,15 @@ fn build_tertian_chord_from_root(
         let safe_semi = abs_semi.max(base_abs_semitone);
         let v_oct = (safe_semi / 12).clamp(2, 6);
         let v_pc = (safe_semi.rem_euclid(12)) as u8;
-        voices.push(format_pitch_class(v_pc, tonic_pc, v_oct));
+        voices.push(format_pitch_class_in_mode(v_pc, tonic_pc, mode, v_oct));
     }
 
     format!("[{}]", voices.join(","))
 }
 
-/// Non-destructive note & chord healer:
-/// 1. Repairs accidental 3+ note semitone clusters (`[a3,b3,c4,d4]`) into playable tertian chords.
-/// 2. Converts space-separated block chords (`[c3 eb3 g3 bb3]`) on slow pad lines into comma-separated
-///    chords (`[c3,eb3,g3,bb3]`) without altering their pitch classes.
-/// 3. Preserves all intentional chromaticism, borrowed chords, blues notes, and modal inflections,
-///    normalizing only `#` syntax into Strudel-safe `s` notation.
-pub fn harmonize_and_voice_note_string(
-    mini: &str,
-    tonic_pc: u8,
-    mode: ScaleMode,
-    is_chord_pad_line: bool,
-) -> String {
-    let mut bracket_healed = String::with_capacity(mini.len());
-    let chars: Vec<char> = mini.chars().collect();
-    let mut idx = 0;
-
-    while idx < chars.len() {
-        if chars[idx] == '[' {
-            let mut close = idx + 1;
-            while close < chars.len() && chars[close] != ']' && chars[close] != '[' {
-                close += 1;
-            }
-            if close < chars.len() && chars[close] == ']' {
-                let inside: String = chars[idx + 1..close].iter().collect();
-
-                // Case A: Comma-separated chord `[n1,n2,n3,n4]`
-                if inside.contains(',') {
-                    let tokens: Vec<&str> = inside.split(',').map(|s| s.trim()).collect();
-                    let parsed: Vec<(u8, i32, bool)> =
-                        tokens.iter().filter_map(|t| parse_pitch_token(t)).collect();
-
-                    if parsed.len() >= 3 && parsed.len() == tokens.len() {
-                        if is_stepwise_cluster(&parsed) {
-                            let (r_pc, r_oct, _) = parsed[0];
-                            let healed_chord = build_tertian_chord_from_root(
-                                r_pc,
-                                r_oct,
-                                parsed.len(),
-                                tonic_pc,
-                                mode,
-                            );
-                            bracket_healed.push_str(&healed_chord);
-                            idx = close + 1;
-                            continue;
-                        } else {
-                            // Preserve exact chord pitches (including chromatic/borrowed voicings), normalizing only `#` -> `s`
-                            let spelled: Vec<String> = tokens
-                                .iter()
-                                .map(|t| normalize_pitch_spelling(t, tonic_pc))
-                                .collect();
-                            bracket_healed.push('[');
-                            bracket_healed.push_str(&spelled.join(","));
-                            bracket_healed.push(']');
-                            idx = close + 1;
-                            continue;
-                        }
-                    }
-                } else {
-                    // Case B: Space-separated group `[n1 n2 n3 n4]` on a slow chord/pad line
-                    let tokens: Vec<&str> = inside.split_whitespace().collect();
-                    let parsed: Vec<(u8, i32, bool)> =
-                        tokens.iter().filter_map(|t| parse_pitch_token(t)).collect();
-
-                    if parsed.len() >= 3
-                        && parsed.len() <= 5
-                        && parsed.len() == tokens.len()
-                        && is_chord_pad_line
-                        && is_tertian_chord_spacing(&parsed)
-                    {
-                        let spelled: Vec<String> = tokens
-                            .iter()
-                            .map(|t| normalize_pitch_spelling(t, tonic_pc))
-                            .collect();
-                        bracket_healed.push('[');
-                        bracket_healed.push_str(&spelled.join(","));
-                        bracket_healed.push(']');
-                        idx = close + 1;
-                        continue;
-                    }
-                }
-            }
-        }
-        bracket_healed.push(chars[idx]);
-        idx += 1;
-    }
-
-    // Normalize `#` pitch spelling on individual tokens while preserving all chromatic/modal note choices
-    let mut final_str = String::with_capacity(bracket_healed.len());
-    let mut token_buf = String::new();
-
-    for ch in bracket_healed.chars() {
-        if ch.is_ascii_alphanumeric()
-            || ch == '#'
-            || ch == '!'
-            || ch == '*'
-            || ch == '@'
-            || ch == '.'
-        {
-            token_buf.push(ch);
-        } else {
-            if !token_buf.is_empty() {
-                final_str.push_str(&normalize_pitch_spelling(&token_buf, tonic_pc));
-                token_buf.clear();
-            }
-            final_str.push(ch);
-        }
-    }
-    if !token_buf.is_empty() {
-        final_str.push_str(&normalize_pitch_spelling(&token_buf, tonic_pc));
-    }
-
-    final_str
-}
-
-/// Returns true if 3+ notes in a simultaneous chord are crammed within 1–2 semitones (e.g. `[a3,b3,c4,d4]`).
-fn is_stepwise_cluster(notes: &[(u8, i32, bool)]) -> bool {
-    let mut semis: Vec<i32> = notes.iter().map(|&(pc, oct, _)| oct * 12 + pc as i32).collect();
-    semis.sort_unstable();
-    let mut narrow_steps = 0;
-    for w in semis.windows(2) {
-        let diff = (w[1] - w[0]).abs();
-        if diff <= 2 {
-            narrow_steps += 1;
-        }
-    }
-    narrow_steps >= 2
-}
-
-/// Returns true ONLY if space-separated notes are strictly ascending in 3rd/4th intervals (3..=5 semitones)
-/// in octaves 2..=5, ensuring melodic phrases and arpeggios with leaps or contour changes stay melodies.
-fn is_tertian_chord_spacing(notes: &[(u8, i32, bool)]) -> bool {
-    let semis: Vec<i32> = notes.iter().map(|&(pc, oct, _)| oct * 12 + pc as i32).collect();
-    if semis.iter().any(|&s| s < 24 || s > 72) {
-        return false;
-    }
-    for w in semis.windows(2) {
-        let diff = w[1] - w[0];
-        if !(3..=5).contains(&diff) {
-            return false;
-        }
-    }
-    true
-}
-
-/// Checks if a line's `note("...")` pattern contains low bass octaves (0, 1, or 2).
-fn line_contains_bass_octaves(line: &str) -> bool {
-    if let Some(pos) = line.find("note(\"") {
-        let after = &line[pos + 6..];
-        if let Some(end_q) = after.find('"') {
-            let note_str = &after[..end_q];
-            for token in note_str.split(|c: char| !c.is_ascii_alphanumeric() && c != '#') {
-                if let Some((_, oct, _)) = parse_pitch_token(token) {
-                    if oct <= 2 {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Studio Auto-Mixer & Orbit Separator:
-/// - Assigns distinct `.orbit(1..6)` to reverb/delay layers so multi-layer scores never turn into mud.
-/// - Injects `.hpf(180)` on upper chord/pad/lead/vocal layers that have no high-pass filter so low-mids stay clean.
-/// - Scales `.gain(...)` intelligently, accounting for whether the score uses sequential `arrange(...)` movements.
-pub fn auto_mix_and_carve_frequencies(code: &str) -> String {
-    let uses_arrange = code.contains("arrange(");
-    let total_triggers = code
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            !t.starts_with("//")
-                && (t.contains("s(\"") || t.contains("note(\"") || t.contains("n(\""))
-        })
-        .count();
-
-    let gain_scale = if uses_arrange {
-        if total_triggers >= 18 {
-            0.88
-        } else {
-            0.95
-        }
-    } else if total_triggers >= 9 {
-        0.76
-    } else if total_triggers >= 6 {
-        0.85
-    } else {
-        1.0
-    };
-
-    let mut orbit_counter = 1usize;
-    let mut out_lines = Vec::new();
-
-    for raw_line in code.lines() {
-        let mut line = raw_line.to_string();
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("//") || trimmed.is_empty() {
-            out_lines.push(line);
-            continue;
-        }
-
-        // 1. Isolate reverb/delay buses with `.orbit(1..6)` if not already set
-        if (line.contains(".room(") || line.contains(".delay(")) && !line.contains(".orbit(") {
-            let orb = (orbit_counter % 6) + 1;
-            orbit_counter += 1;
-            if let Some(pos) = line.find(".room(").or_else(|| line.find(".delay(")) {
-                line.insert_str(pos, &format!(".orbit({})", orb));
-            }
-        }
-
-        // 2. Carve muddy low frequencies from upper supersaw/pad/vocal/lead layers (excluding bass octaves 0..=2)
-        let is_upper_harmonic = (line.contains("\"supersaw\"")
-            || line.contains(".vowel(")
-            || line.contains("\"triangle\"")
-            || line.contains("\"pulse\"")
-            || line.contains("\"square\""))
-            && !line_contains_bass_octaves(&line)
-            && !line.contains(".hpf(");
-
-        if is_upper_harmonic {
-            if let Some(pos) = line.find(".lpf(") {
-                line.insert_str(pos, ".hpf(180)");
-            } else if let Some(pos) = line.find(".gain(") {
-                line.insert_str(pos, ".hpf(180)");
-            }
-        }
-
-        // 3. Scale numeric `.gain(val)` when high simultaneous layer counts are active
-        if gain_scale < 0.99 {
-            if let Some(pos) = line.find(".gain(") {
-                let start = pos + 6;
-                if let Some(end_rel) = line[start..].find(')') {
-                    let arg = line[start..start + end_rel].trim();
-                    if let Ok(val) = arg.parse::<f32>() {
-                        let scaled = (val * gain_scale).clamp(0.14, 0.92);
-                        line.replace_range(start..start + end_rel, &format!("{:.2}", scaled));
-                    }
-                }
-            }
-        }
-
-        out_lines.push(line);
-    }
-
-    out_lines.join("\n")
-}
-
 /// Optional Harmonic & Architectural Context:
-/// Supplies a suggested tonal center and chord palette for inspiration or continuity without
-/// forcing diatonic conformity, fixed section counts, or mandatory slider/visualizer quotas.
+/// Respects explicit user key/mode requests first, falls back to seed entropy when unstated,
+/// and never forces fixed section counts, slider quotas, or visualizer checklists.
 pub fn build_orchestration_directive(
     user_prompt: &str,
     style_ref: &str,
@@ -612,9 +455,8 @@ pub fn build_orchestration_directive(
     let (tonic_pc, mode) = if let Some(code) = existing_code {
         detect_scale_context(code, &combined)
     } else {
-        let roots: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-        let root = roots[(seed as usize) % roots.len()];
-        let (_, inferred_mode) = detect_scale_context("", &combined);
+        let (prompt_root, prompt_mode) = infer_prompt_key_and_mode(&combined);
+        let root = prompt_root.unwrap_or_else(|| (seed % 12) as u8);
         let all_modes = [
             ScaleMode::NaturalMinor,
             ScaleMode::HarmonicMinor,
@@ -624,17 +466,14 @@ pub fn build_orchestration_directive(
             ScaleMode::Major,
             ScaleMode::MelodicMinor,
         ];
-        let final_mode = if inferred_mode == ScaleMode::NaturalMinor && (seed % 3 != 0) {
-            all_modes[((seed / 13) as usize) % all_modes.len()]
-        } else {
-            inferred_mode
-        };
+        let final_mode =
+            prompt_mode.unwrap_or_else(|| all_modes[((seed / 13) as usize) % all_modes.len()]);
         (root, final_mode)
     };
 
     let scale_notes = build_scale_note_list(tonic_pc, mode);
     let degree_table = build_diatonic_degree_table(tonic_pc, mode);
-    let root_name = format_pitch_class(tonic_pc, tonic_pc, 1);
+    let root_name = format_pitch_class_in_mode(tonic_pc, tonic_pc, mode, 1);
     let key_label = format!(
         "{} {}",
         root_name[..root_name.len() - 1].to_uppercase(),
@@ -642,13 +481,13 @@ pub fn build_orchestration_directive(
     );
 
     if let Some(current) = existing_code {
-        let current_sections = count_sections_and_triggers(current);
+        let current_triggers = count_triggers(current);
         format!(
             "EVOLUTION CONTEXT & OPTIONAL HARMONIC PALETTE (Generation #{} | Active Triggers: {})\n\
              - DETECTED TONAL CENTER: **{}** (Reference pitch classes: `{}`)\n\
              - OPTIONAL DIATONIC CHORD PALETTE (Use commas inside `[...]` for simultaneous chords): `{}`\n\
-             - HARMONIC & STRUCTURAL FREEDOM: Preserve the core musical identity of the score where appropriate, or introduce chromaticism, modal mixture, key modulations, polyrhythms, new movements, or structural transformations as the user's evolution directive demands.",
-            evo_gen, current_sections, key_label, scale_notes, degree_table
+             - HARMONIC & STRUCTURAL FREEDOM: Preserve the core musical identity of the score where appropriate, or introduce chromaticism, modal mixture, key modulations, polyrhythms, or structural transformations as the user's evolution directive demands.",
+            evo_gen, current_triggers, key_label, scale_notes, degree_table
         )
     } else {
         format!(
@@ -656,9 +495,7 @@ pub fn build_orchestration_directive(
              - SUGGESTED TONAL CENTER (Optional starting point unless overridden by prompt): **{}**\n\
              - REFERENCE SCALE PITCH CLASSES: `{}` (Chromatic passing tones, borrowed chords, modal shifts, and microtonal detuning are welcome whenever musically appropriate).\n\
              - OPTIONAL TERTIAN CHORD PALETTE (Use commas inside `[...]` when voicing simultaneous chords): `{}`\n\
-             - FORM FOLLOWS MUSICAL INTENT:\n\
-               * Choose the structure that genuinely fits the brief—whether that is a multi-movement `arrange([cycles, section], ...)` journey, a continuous evolving `stack(...)` groove using `.every(...)` / `.mask(...)` / `.struct(...)`, an ambient soundscape with no drums, or an asymmetric polyrhythmic study.\n\
-               * Include top-level `const` `slider(...)` macros and inline visualizers (`._scope()`, `._pianoroll()`, `._punchcard()`, `._spiral()`) when they enhance the piece or when requested by the user, rather than forcing a fixed quota.",
+             - FORM FOLLOWS MUSICAL INTENT: Choose the structure that genuinely fits the brief—whether that is a multi-section `arrange([cycles, section], ...)` journey, a continuous evolving `stack(...)` groove, a sparse ambient soundscape, or an asymmetric polyrhythmic study.",
             seed % 10000,
             key_label,
             scale_notes,
@@ -672,7 +509,7 @@ fn build_scale_note_list(tonic_pc: u8, mode: ScaleMode) -> String {
     let names: Vec<String> = intervals
         .iter()
         .map(|&deg| {
-            let s = format_pitch_class((tonic_pc + deg) % 12, tonic_pc, 3);
+            let s = format_pitch_class_in_mode((tonic_pc + deg) % 12, tonic_pc, mode, 3);
             s[..s.len() - 1].to_string()
         })
         .collect();
@@ -692,12 +529,54 @@ fn build_diatonic_degree_table(tonic_pc: u8, mode: ScaleMode) -> String {
     entries.join(" | ")
 }
 
-fn count_sections_and_triggers(code: &str) -> usize {
+fn count_triggers(code: &str) -> usize {
     code.lines()
         .filter(|l| {
             let t = l.trim();
             !t.starts_with("//")
-                && (t.contains("s(\"") || t.contains("note(\"") || t.contains("n(\""))
+                && (t.contains("s(")
+                    || t.contains("sound(")
+                    || t.contains("note(")
+                    || t.contains("n("))
         })
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_prompt_key_and_mode_are_respected() {
+        let (root, mode) = infer_prompt_key_and_mode("Compose a dark synthwave track in F# minor");
+        assert_eq!(root, Some(6));
+        assert_eq!(mode, Some(ScaleMode::NaturalMinor));
+
+        let directive = build_orchestration_directive(
+            "Compose a dark synthwave track in F# minor",
+            "",
+            None,
+            0,
+            999,
+        );
+        assert!(directive.contains("FS Natural Minor (Aeolian)"));
+    }
+
+    #[test]
+    fn d_minor_uses_flat_spelling_while_g_major_uses_sharp_spelling() {
+        let d_minor_notes = build_scale_note_list(2, ScaleMode::NaturalMinor);
+        assert_eq!(d_minor_notes, "d, e, f, g, a, bb, c");
+
+        let g_major_notes = build_scale_note_list(7, ScaleMode::Major);
+        assert_eq!(g_major_notes, "g, a, b, c, d, e, fs");
+    }
+
+    #[test]
+    fn histogram_outweighs_single_passing_bass_note() {
+        let code = "setcps(0.5)\n\
+                    note('g2 c2 c2 c2 c2').s('sawtooth')\n\
+                    note(\"c4 eb4 g4 c5\").s(\"supersaw\")";
+        let (pc, _) = detect_scale_context(code, "");
+        assert_eq!(pc, 0); // C (0) outweighs a single opening G2 (7)
+    }
 }
