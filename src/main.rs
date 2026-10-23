@@ -36,9 +36,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::{mpsc, RwLock},
+    task::JoinHandle,
 };
 
-const APP_VERSION: &str = "6.7.0";
+const APP_VERSION: &str = "6.8.0";
 const LOOPBACK_IP: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 7777;
 const OLLAMA_PORT: u16 = 11434;
@@ -56,6 +57,8 @@ const MAX_PINNED_GOLDEN_TRACKS: usize = 2;
 const MAX_PINNED_ADVISORY_CHARS: usize = 8_000;
 const MAX_SCRAPE_BYTES: usize = 256 * 1024;
 const MAX_DEBUG_LOG_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SCORE_HISTORY: usize = 32;
+const MAX_REPAIR_CANDIDATE_CHARS: usize = 12_000;
 
 const STANDBY_BUFFER: &str = r##"// [AGENTIC READY] Smart Master Palette: one curated architecture seed per build/evolution.
 // Press Ctrl+P to select Smart Auto, Free-form, or one of the curated composition blueprints.
@@ -85,6 +88,13 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn rotate_debug_log_if_needed(log_path: &Path) {
     if let Ok(meta) = fs::metadata(log_path) {
         if meta.len() > MAX_DEBUG_LOG_BYTES {
@@ -104,11 +114,7 @@ fn log_diag(stage: &str, detail: &str) {
         .append(true)
         .open(log_path)
     {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
+        let ts = now_epoch_secs();
         let _ = writeln!(file, "[{}] [{}] {}", ts, stage, detail);
     }
 }
@@ -188,6 +194,40 @@ OPTIONAL VISUAL & TELEMETRY TOOLKIT:\n\
 
     prompt.push_str("\n\nReturn ONLY raw executable Strudel code starting with setcps():");
     prompt
+}
+
+/// Builds the stateful repair block for retry attempts (`attempt > 1`).
+/// Including the failed candidate source allows the model to perform a surgical fix
+/// on its own code instead of inventing a brand-new composition from scratch.
+fn build_repair_feedback(
+    last_error: Option<&str>,
+    failed_candidate: Option<&str>,
+) -> String {
+    let Some(err) = last_error else {
+        return String::new();
+    };
+
+    match failed_candidate.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(candidate) => {
+            let bounded_candidate: String = candidate.chars().take(MAX_REPAIR_CANDIDATE_CHARS).collect();
+            format!(
+                "\n\nMANDATORY REPAIR FEEDBACK FROM THE PREVIOUS CANDIDATE:\n{}\n\n\
+                 PREVIOUS CANDIDATE SOURCE TO REPAIR (fix the reported defect while preserving all working musical stems and structure):\n\
+                 {}\n\n\
+                 Fix the earliest reported defect first. Preserve all known-good musical material and the composition's identity. Do not repeat the failed construct, and do not rewrite the whole arrangement from scratch to fix a local syntax, stem-wiring, or runtime problem. Return a complete repaired replacement score only.",
+                err, bounded_candidate
+            )
+        }
+        None => format!(
+            "\n\nMANDATORY REPAIR FEEDBACK FROM THE PREVIOUS CANDIDATE:\n{}\n\
+             Fix the earliest reported defect first. Preserve all known-good musical material and the composition's identity. Do not merely paraphrase the diagnostic, do not repeat the failed construct, and do not rewrite the whole arrangement to fix a local syntax/runtime problem. Return a complete replacement score only.",
+            err
+        ),
+    }
+}
+
+fn format_timestamped_export_path(evo_gen: u32, epoch_secs: u64) -> String {
+    format!("exports/motifai_gen{}_{}.strudel.js", evo_gen, epoch_secs)
 }
 
 #[derive(Serialize)]
@@ -342,6 +382,13 @@ impl StudioBridgeState {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScoreSnapshot {
+    code: String,
+    evolution_count: u32,
+    experiment_id: Option<String>,
+}
+
 enum BotEvent {
     ModelsDiscovered(Vec<String>),
     StatusUpdate(String),
@@ -363,10 +410,13 @@ struct App {
     shared_code: Arc<RwLock<String>>,
     status_message: String,
     is_generating: bool,
+    active_generation_task: Option<JoinHandle<()>>,
     available_models: Vec<String>,
     model_index: usize,
     scroll_offset: u16,
     evolution_count: u32,
+    score_history: Vec<ScoreSnapshot>,
+    history_cursor: usize,
     intelligence: SonicIntelligence,
     active_experiment_id: Option<String>,
     use_golden_tracks: bool,
@@ -451,10 +501,13 @@ impl App {
             shared_code,
             status_message: initial_status,
             is_generating: false,
+            active_generation_task: None,
             available_models: vec![default_model],
             model_index: 0,
             scroll_offset: 0,
             evolution_count: 0,
+            score_history: Vec::new(),
+            history_cursor: 0,
             intelligence,
             active_experiment_id: None,
             use_golden_tracks: false,
@@ -471,6 +524,90 @@ impl App {
             last_injected_tracks: Vec::new(),
             runtime_studio_opened: false,
         }
+    }
+
+    fn record_score_snapshot(&mut self, code: String, evolution_count: u32, experiment_id: Option<String>) {
+        if !self.score_history.is_empty() && self.history_cursor + 1 < self.score_history.len() {
+            self.score_history.truncate(self.history_cursor + 1);
+        }
+        if self
+            .score_history
+            .last()
+            .map(|last| last.code == code)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if self.score_history.len() >= MAX_SCORE_HISTORY {
+            self.score_history.remove(0);
+        }
+        self.score_history.push(ScoreSnapshot {
+            code,
+            evolution_count,
+            experiment_id,
+        });
+        self.history_cursor = self.score_history.len().saturating_sub(1);
+    }
+
+    fn undo_score(&mut self) {
+        if self.score_history.len() <= 1 || self.history_cursor == 0 {
+            self.status_message = "History: already at the earliest recorded score in this session.".to_string();
+            return;
+        }
+        self.history_cursor -= 1;
+        if let Some(snapshot) = self.score_history.get(self.history_cursor).cloned() {
+            self.strudel_code = snapshot.code.clone();
+            self.evolution_count = snapshot.evolution_count;
+            self.active_experiment_id = snapshot.experiment_id;
+            self.scroll_offset = 0;
+            if let Ok(mut guard) = self.shared_code.try_write() {
+                *guard = snapshot.code;
+            }
+            self.status_message = format!(
+                "Undo [Ctrl+Z]: restored score {}/{} (Evo #{}) — synced to Studio.",
+                self.history_cursor + 1,
+                self.score_history.len(),
+                self.evolution_count
+            );
+        }
+    }
+
+    fn redo_score(&mut self) {
+        if self.score_history.is_empty() || self.history_cursor + 1 >= self.score_history.len() {
+            self.status_message = "History: already at the latest score in this session.".to_string();
+            return;
+        }
+        self.history_cursor += 1;
+        if let Some(snapshot) = self.score_history.get(self.history_cursor).cloned() {
+            self.strudel_code = snapshot.code.clone();
+            self.evolution_count = snapshot.evolution_count;
+            self.active_experiment_id = snapshot.experiment_id;
+            self.scroll_offset = 0;
+            if let Ok(mut guard) = self.shared_code.try_write() {
+                *guard = snapshot.code;
+            }
+            self.status_message = format!(
+                "Redo [Ctrl+U]: restored score {}/{} (Evo #{}) — synced to Studio.",
+                self.history_cursor + 1,
+                self.score_history.len(),
+                self.evolution_count
+            );
+        }
+    }
+
+    fn cancel_active_generation(&mut self) -> bool {
+        if !self.is_generating {
+            return false;
+        }
+        if let Some(handle) = self.active_generation_task.take() {
+            handle.abort();
+        }
+        self.is_generating = false;
+        log_diag("GENERATION_CANCELLED", "User aborted in-flight generation via Esc.");
+        self.status_message = String::from(
+            "Generation cancelled [Esc]. Ready for next command (press Esc again while idle to quit).",
+        );
+        true
     }
 
     fn current_model(&self) -> String {
@@ -1214,6 +1351,14 @@ fn build_runtime_validation_script(
       return;
     }
 
+    const popout = document.getElementById("popout");
+    if (popout && code) {
+      try {
+        const encoded = btoa(unescape(encodeURIComponent(code)));
+        popout.href = "https://strudel.cc/#" + encodeURIComponent(encoded);
+      } catch (_) {}
+    }
+
     const diagnostics = [];
     const originalWarn = console.warn;
     const originalError = console.error;
@@ -1602,30 +1747,37 @@ async fn generate_strudel_track(
         );
     }
     let mut last_ast_error: Option<String> = None;
+    let mut last_failed_candidate: Option<String> = None;
     let mut last_warnings = Vec::new();
     let mut previous_candidates: Vec<String> = Vec::new();
     let mut runtime_check_started = false;
 
     // Repair is bounded and evidence-driven: preflight failures and actual REPL
-    // evaluation errors feed the next prompt instead of accepting the first plausible string.
+    // evaluation errors feed the next prompt alongside the rejected candidate code.
     for attempt in 1..=MAX_GENERATION_ATTEMPTS {
         let seed = fresh_entropy_seed().wrapping_add((attempt as u64) * 7919);
 
         let orchestration_dna = orchestrator::build_orchestration_directive(
             &user_prompt,
             &style_ref,
-            existing_code.as_deref(),
+            existing_code
+                .as_deref()
+                .or(last_failed_candidate.as_deref()),
             evo_gen,
             seed,
         );
 
-        let error_feedback = match &last_ast_error {
-            Some(err) => format!(
-                "\n\nMANDATORY REPAIR FEEDBACK FROM THE PREVIOUS CANDIDATE:\n{}\n\
-                 Fix the earliest reported defect first. Preserve all known-good musical material and the composition's identity. Do not merely paraphrase the diagnostic, do not repeat the failed construct, and do not rewrite the whole arrangement to fix a local syntax/runtime problem. Return a complete replacement score only.",
-                err
-            ),
-            None => String::new(),
+        let error_feedback = build_repair_feedback(
+            last_ast_error.as_deref(),
+            last_failed_candidate.as_deref(),
+        );
+
+        // When repairing a concrete candidate (`attempt > 1` with `last_failed_candidate`),
+        // omit the 14,000-character blueprint block so the model focuses on fixing the code defect (`P1.3`).
+        let active_blueprint_block = if attempt == 1 || last_failed_candidate.is_none() {
+            blueprint_context.as_str()
+        } else {
+            ""
         };
 
         let knowledge_entries = strudel_knowledge::retrieve_production_knowledge(
@@ -1667,7 +1819,7 @@ async fn generate_strudel_track(
                 effective_vision,
                 effective_style,
                 scraped_context,
-                blueprint_context,
+                active_blueprint_block,
                 error_feedback,
                 current
             ),
@@ -1686,7 +1838,7 @@ async fn generate_strudel_track(
                 effective_vision,
                 effective_style,
                 scraped_context,
-                blueprint_context,
+                active_blueprint_block,
                 error_feedback
             ),
         };
@@ -1740,7 +1892,7 @@ async fn generate_strudel_track(
         if attempt > 1 {
             let _ = tx
                 .send(BotEvent::StatusUpdate(format!(
-                    "Agent refining score via '{}' (Attempt {}/{}, temp={:.2})...",
+                    "Agent repairing candidate via '{}' (Attempt {}/{}, temp={:.2}) [Esc to cancel]...",
                     model, attempt, MAX_GENERATION_ATTEMPTS, temp
                 )))
                 .await;
@@ -1825,7 +1977,7 @@ async fn generate_strudel_track(
                                 let rate = (chunk_count as f32) / elapsed;
                                 let _ = tx
                                     .send(BotEvent::StatusUpdate(format!(
-                                        "Agent '{}' streaming (Attempt {}/{}): ~{} tokens ({:.1} tok/s, {:.0}s elapsed)...",
+                                        "Agent '{}' streaming (Attempt {}/{}): ~{} tokens ({:.1} tok/s, {:.0}s) [Esc to cancel]...",
                                         model, attempt, MAX_GENERATION_ATTEMPTS, chunk_count, rate, elapsed
                                     )))
                                     .await;
@@ -1890,6 +2042,7 @@ async fn generate_strudel_track(
                             existing_code.as_deref(),
                         ) {
                             log_diag("CLONE_REJECTED", &clone_warn);
+                            last_failed_candidate = Some(healed_code);
                             last_warnings.push(clone_warn.clone());
                             last_ast_error = Some(clone_warn);
                             continue;
@@ -1901,6 +2054,7 @@ async fn generate_strudel_track(
                         {
                             let duplicate = "DUPLICATE RETRY CANDIDATE: the model repeated a previously rejected score verbatim. Make a technical correction to the reported defect instead of returning the same source again.".to_string();
                             log_diag("DUPLICATE_RETRY_REJECTED", &duplicate);
+                            last_failed_candidate = Some(healed_code);
                             last_warnings.push(duplicate.clone());
                             last_ast_error = Some(duplicate);
                             continue;
@@ -2016,6 +2170,7 @@ async fn generate_strudel_track(
                                     report.detail
                                 );
                                 log_diag("STRudel_RUNTIME_RETRY", &runtime_error);
+                                last_failed_candidate = Some(healed_code);
                                 last_warnings.push(runtime_error.clone());
                                 last_ast_error = Some(runtime_error);
                                 continue;
@@ -2063,6 +2218,10 @@ async fn generate_strudel_track(
                     }
                     Err(ast_err) => {
                         log_diag("AST_HEAL_RETRY", &ast_err);
+                        let raw_trimmed = assembled_response.trim();
+                        if !raw_trimmed.is_empty() {
+                            last_failed_candidate = Some(raw_trimmed.to_string());
+                        }
                         last_warnings.push(ast_err.clone());
                         last_ast_error = Some(ast_err);
                     }
@@ -2168,7 +2327,7 @@ async fn main() -> Result<()> {
                     }
                     app.scroll_offset = 0;
                     app.status_message = format!(
-                        "Runtime-checking Strudel candidate {}/{} in the embedded REPL...",
+                        "Runtime-checking Strudel candidate {}/{} in the embedded REPL [Esc to cancel]...",
                         attempt, MAX_GENERATION_ATTEMPTS
                     );
                     if open_studio && !app.runtime_studio_opened {
@@ -2184,6 +2343,7 @@ async fn main() -> Result<()> {
                     }
 
                     app.is_generating = false;
+                    app.active_generation_task = None;
                     app.scroll_offset = 0;
                     app.last_injected_tracks = injected_tracks.clone();
 
@@ -2229,6 +2389,12 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    app.record_score_snapshot(
+                        code,
+                        app.evolution_count,
+                        app.active_experiment_id.clone(),
+                    );
+
                     if !app.runtime_studio_opened {
                         open_browser_url(&local_studio_endpoint("/studio"));
                         app.runtime_studio_opened = true;
@@ -2241,18 +2407,25 @@ async fn main() -> Result<()> {
                     };
                     app.status_message = if runtime_unverified {
                         format!(
-                            "Preflight passed, but runtime was NOT verified (Evo #{} | {}). Check Studio status, then press Ctrl+Enter to audition.",
-                            app.evolution_count, reference_status
+                            "Preflight passed, but runtime was NOT verified (Evo #{} | Hist {}/{} | {}). Check Studio, then Ctrl+Enter.",
+                            app.evolution_count,
+                            app.history_cursor + 1,
+                            app.score_history.len(),
+                            reference_status
                         )
                     } else {
                         format!(
-                            "Embedded Strudel evaluation passed (Evo #{} | {}). Press Ctrl+Enter to audition; audible output is not auto-verified.",
-                            app.evolution_count, reference_status
+                            "Embedded Strudel evaluation passed (Evo #{} | Hist {}/{} | {}). Press Ctrl+Enter to audition; audible output not auto-verified.",
+                            app.evolution_count,
+                            app.history_cursor + 1,
+                            app.score_history.len(),
+                            reference_status
                         )
                     };
                 }
                 BotEvent::Error(err) => {
                     app.is_generating = false;
+                    app.active_generation_task = None;
                     let selection_status = if app.last_injected_tracks.is_empty() {
                         "Pure Agentic (0 Golden refs)".to_string()
                     } else {
@@ -2361,6 +2534,9 @@ async fn main() -> Result<()> {
                 }
 
                 if key.code == KeyCode::Esc {
+                    if app.cancel_active_generation() {
+                        continue;
+                    }
                     break;
                 }
 
@@ -2416,6 +2592,20 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z'))
+                {
+                    app.undo_score();
+                    continue;
+                }
+
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U'))
+                {
+                    app.redo_score();
+                    continue;
+                }
+
                 if key.code == KeyCode::F(5)
                     || (key.modifiers.contains(KeyModifiers::CONTROL)
                         && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')))
@@ -2446,11 +2636,11 @@ async fn main() -> Result<()> {
                             format!("Golden refs: {}", curated_track_names.join(", "))
                         };
                         app.status_message = format!(
-                            "Agent '{}' composing score... [Palette: {} | {}]",
+                            "Agent '{}' composing score... [Palette: {} | {} | Esc to cancel]",
                             model, app.blueprint_mode_label(), reference_status
                         );
 
-                        tokio::spawn(async move {
+                        app.active_generation_task = Some(tokio::spawn(async move {
                             generate_strudel_track(
                                 model,
                                 prompt,
@@ -2468,7 +2658,7 @@ async fn main() -> Result<()> {
                                 tx_clone,
                             )
                             .await;
-                        });
+                        }));
                     }
 
                     continue;
@@ -2511,7 +2701,7 @@ async fn main() -> Result<()> {
                                     format!("Golden refs: {}", curated_track_names.join(", "))
                                 };
                                 app.status_message = format!(
-                                    "Agent '{}' evolving score into Gen #{}... [Palette: {} | {}]",
+                                    "Agent '{}' evolving score into Gen #{}... [Palette: {} | {} | Esc to cancel]",
                                     model, evo_gen, app.blueprint_mode_label(), reference_status
                                 );
 
@@ -2525,7 +2715,7 @@ async fn main() -> Result<()> {
                                     );
                                 }
 
-                                tokio::spawn(async move {
+                                app.active_generation_task = Some(tokio::spawn(async move {
                                     generate_strudel_track(
                                         model,
                                         prompt,
@@ -2543,7 +2733,7 @@ async fn main() -> Result<()> {
                                         tx_clone,
                                     )
                                     .await;
-                                });
+                                }));
                             }
 
                             continue;
@@ -2656,6 +2846,11 @@ async fn main() -> Result<()> {
                             continue;
                         }
                         KeyCode::Char('s') | KeyCode::Char('S') => {
+                            let archive_path =
+                                format_timestamped_export_path(app.evolution_count, now_epoch_secs());
+                            let _ = fs::create_dir_all("exports");
+                            let archive_saved = fs::write(&archive_path, &app.strudel_code).is_ok();
+
                             match fs::write("masterpiece.strudel.js", &app.strudel_code) {
                                 Ok(()) => {
                                     if let Some(ref exp_id) = app.active_experiment_id {
@@ -2668,9 +2863,16 @@ async fn main() -> Result<()> {
                                         );
                                     }
 
-                                    app.status_message = String::from(
-                                        "Saved current song to 'masterpiece.strudel.js'!",
-                                    );
+                                    if archive_saved {
+                                        app.status_message = format!(
+                                            "Saved to 'masterpiece.strudel.js' and archived to '{}'!",
+                                            archive_path
+                                        );
+                                    } else {
+                                        app.status_message = String::from(
+                                            "Saved current song to 'masterpiece.strudel.js'!",
+                                        );
+                                    }
                                 }
                                 Err(error) => {
                                     app.status_message =
@@ -2884,7 +3086,7 @@ fn ui(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_style(code_border)
                 .title(
-                    " [3] Autonomous Agentic Strudel Score (Up/Down: Scroll | Left/Right: Tempo | Ctrl+S: Save | Ctrl+Y: Like | Ctrl+N: Revise) ",
+                    " [3] Autonomous Agentic Strudel Score (Up/Down: Scroll | Left/Right: Tempo | Ctrl+Z/U: Undo/Redo | Ctrl+S: Save | Ctrl+Y/N: Rate) ",
                 ),
         );
 
@@ -3116,5 +3318,44 @@ mod tests {
         let concert = resolve_inference_profile("qwen2.5-coder:14b", "Write a full live set concert", "");
         assert_eq!(concert.num_ctx, 32_768);
         assert_eq!(concert.num_predict, 8_192);
+    }
+
+    #[test]
+    fn repair_feedback_includes_failed_candidate_source_when_present() {
+        let broken = "setcps(0.5)\nconst drums = s(\"bd sd\")\nconst deadLead = note(\"c4\")\nstack(drums)";
+        let feedback = build_repair_feedback(
+            Some("pattern stem 'deadLead' is declared but never referenced"),
+            Some(broken),
+        );
+        assert!(feedback.contains("MANDATORY REPAIR FEEDBACK"));
+        assert!(feedback.contains("PREVIOUS CANDIDATE SOURCE TO REPAIR"));
+        assert!(feedback.contains("const deadLead = note(\"c4\")"));
+    }
+
+    #[test]
+    fn score_history_undo_and_redo_preserve_snapshots_and_branching() {
+        let shared = Arc::new(RwLock::new(String::from(STANDBY_BUFFER)));
+        let mut app = App::new(shared);
+
+        app.record_score_snapshot("setcps(0.5)\ns(\"bd\")".to_string(), 0, Some("exp-1".to_string()));
+        app.record_score_snapshot("setcps(0.5)\ns(\"bd sd\")".to_string(), 1, Some("exp-2".to_string()));
+        assert_eq!(app.score_history.len(), 2);
+        assert_eq!(app.history_cursor, 1);
+
+        app.undo_score();
+        assert_eq!(app.history_cursor, 0);
+        assert_eq!(app.strudel_code, "setcps(0.5)\ns(\"bd\")");
+        assert_eq!(app.evolution_count, 0);
+
+        app.redo_score();
+        assert_eq!(app.history_cursor, 1);
+        assert_eq!(app.strudel_code, "setcps(0.5)\ns(\"bd sd\")");
+        assert_eq!(app.evolution_count, 1);
+    }
+
+    #[test]
+    fn export_filename_includes_generation_and_timestamp() {
+        let path = format_timestamped_export_path(3, 1_761_200_000);
+        assert_eq!(path, "exports/motifai_gen3_1761200000.strudel.js");
     }
 }

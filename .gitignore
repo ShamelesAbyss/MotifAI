@@ -9,3 +9,5 @@ motif_memory.json
 *.bak
 *.corrupt.*
 .DS_Store
+
+exports/

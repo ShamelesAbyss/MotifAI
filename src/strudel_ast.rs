@@ -74,7 +74,10 @@ pub fn analyze_ast_health(
                 if !name.is_empty()
                     && contains_any_call(
                         right,
-                        &["stack", "arrange", "cat", "slowcat", "seq", "fastcat", "stepcat", "polymeter"],
+                        &[
+                            "stack", "arrange", "cat", "slowcat", "seq", "fastcat", "stepcat",
+                            "polymeter",
+                        ],
                     )
                 {
                     parsed_sections.push(name.to_string());
@@ -135,6 +138,7 @@ pub fn validate_strudel_ast(code: &str) -> Result<(), String> {
     reject_standalone_weighted_filter_values(code)?;
     reject_unquoted_numeric_notation_candidates(&masked)?;
     reject_javascript_slider_arithmetic(&masked)?;
+    reject_invented_root_wrapper(&masked)?;
 
     if !contains_trigger_call(&masked) {
         return Err(
@@ -149,6 +153,8 @@ pub fn validate_strudel_ast(code: &str) -> Result<(), String> {
                 .to_string(),
         );
     }
+
+    reject_unused_sliders_and_pattern_stems(&masked)?;
 
     Ok(())
 }
@@ -244,7 +250,9 @@ fn heal_standalone_weighted_filter_values(source: &str) -> String {
                     _ => SourceScanState::Code,
                 };
             }
-            SourceScanState::SingleQuoted | SourceScanState::DoubleQuoted | SourceScanState::Template => {
+            SourceScanState::SingleQuoted
+            | SourceScanState::DoubleQuoted
+            | SourceScanState::Template => {
                 let ch = rest.chars().next().expect("i is inside source");
                 output.push(ch);
                 i += ch.len_utf8();
@@ -693,7 +701,10 @@ fn validate_mini_notation_delimiters(source: &str) -> Result<(), String> {
 fn validate_literal_delimiters(literal: &str, start_line: usize) -> Result<(), String> {
     // Avoid interpreting ordinary strings as mini-notation unless they contain
     // one of its grouping/alternation delimiters.
-    if !literal.chars().any(|ch| matches!(ch, '[' | ']' | '{' | '}' | '<' | '>')) {
+    if !literal
+        .chars()
+        .any(|ch| matches!(ch, '[' | ']' | '{' | '}' | '<' | '>'))
+    {
         return Ok(());
     }
 
@@ -739,7 +750,6 @@ fn validate_literal_delimiters(literal: &str, start_line: usize) -> Result<(), S
 /// declarations. This is a conservative line/statement heuristic, not a parser.
 fn has_final_root_expression(masked_code: &str) -> bool {
     use impl_statement_kind::Kind;
-
 
     let chars: Vec<char> = masked_code.chars().collect();
     let mut last_kind: Option<Kind> = None;
@@ -847,7 +857,7 @@ fn is_identifier_start(ch: char) -> bool {
 }
 
 fn contains_trigger_call(masked_code: &str) -> bool {
-    ["s", "sound", "note", "n"]
+    ["s", "sound", "note", "n", "chord"]
         .iter()
         .any(|name| contains_identifier_call(masked_code, name))
 }
@@ -1128,6 +1138,66 @@ fn reject_javascript_slider_arithmetic(masked_code: &str) -> Result<(), String> 
             ));
         }
     }
+    Ok(())
+}
+
+/// Rejects invented `root(...)` wrappers so the model evaluates its final
+/// Pattern expression (`stack(...)`, `arrange(...)`, or a pattern variable) directly.
+fn reject_invented_root_wrapper(masked_code: &str) -> Result<(), String> {
+    for line in masked_code.lines() {
+        let trimmed = line.trim();
+        if starts_with_call(trimmed, "root") {
+            return Err(
+                "Strudel preflight failed: found an invented top-level `root(...)` wrapper. Do not wrap the final Pattern in `root(...)`; end the score directly with `stack(...)`, `arrange(...)`, `cat(...)`, or the final Pattern variable name."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Rejects declared `slider(...)` controls and named Strudel pattern stems that
+/// are never referenced anywhere else in the program. This prevents orphaned
+/// solos, silent sub-bass layers, and dead UI sliders from passing preflight.
+fn reject_unused_sliders_and_pattern_stems(masked_code: &str) -> Result<(), String> {
+    for name in extract_slider_names(masked_code) {
+        if identifier_occurrences(masked_code, &name) <= 1 {
+            return Err(format!(
+                "Strudel preflight failed: slider '{name}' is declared but never wired to an audible parameter. Reference '{name}' in a parameter such as `.lpf({name})` or `.gain({name})`, or remove the unused slider declaration."
+            ));
+        }
+    }
+
+    const PATTERN_CONSTRUCTORS: &[&str] = &[
+        "s", "sound", "note", "n", "chord", "stack", "arrange", "cat", "slowcat", "fastcat",
+        "seq", "stepcat", "polymeter",
+    ];
+
+    for line in masked_code.lines() {
+        let trimmed = line.trim();
+        if !is_variable_declaration(trimmed) {
+            continue;
+        }
+        let Some((left, right)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let name = declared_name(left);
+        if name.is_empty() || name.starts_with('_') {
+            continue;
+        }
+        // Ignore arrow/function definitions and plain non-pattern constants.
+        if right.contains("=>") || right.trim_start().starts_with("function") {
+            continue;
+        }
+        if contains_any_call(right, PATTERN_CONSTRUCTORS)
+            && identifier_occurrences(masked_code, name) <= 1
+        {
+            return Err(format!(
+                "Strudel preflight failed: pattern stem '{name}' is declared but never referenced in the final Pattern or section stacks. Include '{name}' in your arrangement (`stack(...)` / `arrange(...)`) or remove the unused variable."
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -1422,6 +1492,7 @@ fn looks_like_strudel_code(candidate: &str) -> bool {
         "sound(",
         "s(",
         "n(",
+        "chord(",
         "const ",
         "let ",
         "var ",
@@ -1449,6 +1520,7 @@ fn is_valid_code_start(trimmed: &str) -> bool {
         || trimmed.starts_with("sound(")
         || trimmed.starts_with("note(")
         || trimmed.starts_with("n(")
+        || trimmed.starts_with("chord(")
 }
 
 fn is_trailing_prose(
@@ -1513,12 +1585,16 @@ fn looks_like_code_continuation(trimmed: &str) -> bool {
     let identifier = first
         .trim_start_matches('(')
         .trim_end_matches(|ch: char| matches!(ch, '(' | ')' | ';' | ','));
-    if identifier.is_empty() || !identifier.chars().next().map(is_identifier_start).unwrap_or(false) {
+    if identifier.is_empty()
+        || !identifier
+            .chars()
+            .next()
+            .map(is_identifier_start)
+            .unwrap_or(false)
+    {
         return false;
     }
-    trimmed.contains('(')
-        || trimmed.contains('.')
-        || trimmed.trim_end_matches(';') == identifier
+    trimmed.contains('(') || trimmed.contains('.') || trimmed.trim_end_matches(';') == identifier
 }
 
 fn update_delimiter_depths(
@@ -1613,7 +1689,8 @@ mod autonomy_regression_tests {
 
     #[test]
     fn block_metadata_survives_extraction() {
-        let code = "/*\n@title Night Circuit\n@by MotifAI\n*/\nsetcps(0.5)\nstack(s(\"bd\"), note(\"c3 e3\"))";
+        let code =
+            "/*\n@title Night Circuit\n@by MotifAI\n*/\nsetcps(0.5)\nstack(s(\"bd\"), note(\"c3 e3\"))";
         assert_eq!(compile_and_heal_strudel(code).unwrap(), code);
     }
 
@@ -1622,7 +1699,9 @@ mod autonomy_regression_tests {
         let code = "setcps(0.5)\nconst bass = note(\"c2 e2\").s(\"sawtooth\")";
         let result = compile_and_heal_strudel(code);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("final evaluated pattern expression"));
+        assert!(result
+            .unwrap_err()
+            .contains("final evaluated pattern expression"));
     }
 
     #[test]
@@ -1640,7 +1719,8 @@ mod autonomy_regression_tests {
 
     #[test]
     fn direct_slider_parameter_is_preserved_and_accepted() {
-        let code = "setcps(0.5)\nconst level = slider(0.4, 0, 1, 0.05)\nstack(note(\"c3 e3\").gain(level))";
+        let code =
+            "setcps(0.5)\nconst level = slider(0.4, 0, 1, 0.05)\nstack(note(\"c3 e3\").gain(level))";
         let result = compile_and_heal_strudel(code).unwrap();
         assert!(result.contains("slider(0.4, 0, 1, 0.05)"));
         let analysis = analyze_ast_health(&result, Vec::new(), true);
@@ -1725,5 +1805,26 @@ mod autonomy_regression_tests {
         let code = "const ignored = () => {\nsetcps(0.2)\n}\nstack(s(\"bd\"))";
         let result = compile_and_heal_strudel(code).unwrap();
         assert!(result.starts_with("setcps(0.55)\n"));
+    }
+
+    #[test]
+    fn unwired_slider_is_rejected_by_preflight() {
+        let code = "setcps(0.5)\nconst deadCutoff = slider(800, 200, 4000)\nconst lead = note(\"c4 eb4 g4\").s(\"sawtooth\")\nlead";
+        let err = compile_and_heal_strudel(code).unwrap_err();
+        assert!(err.contains("slider 'deadCutoff' is declared but never wired"));
+    }
+
+    #[test]
+    fn unused_pattern_stem_is_rejected_by_preflight() {
+        let code = "setcps(0.5)\nconst drums = s(\"bd sd\")\nconst forgottenSolo = note(\"c5 eb5 g5\").s(\"supersaw\")\nstack(drums)";
+        let err = compile_and_heal_strudel(code).unwrap_err();
+        assert!(err.contains("pattern stem 'forgottenSolo' is declared but never referenced"));
+    }
+
+    #[test]
+    fn invented_root_wrapper_is_rejected_by_preflight() {
+        let code = "setcps(0.5)\nconst drums = s(\"bd sd\")\nroot(drums)";
+        let err = compile_and_heal_strudel(code).unwrap_err();
+        assert!(err.contains("invented top-level `root(...)` wrapper"));
     }
 }
