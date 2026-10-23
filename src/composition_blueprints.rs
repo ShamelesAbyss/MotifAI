@@ -10,6 +10,8 @@ use std::{
     collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const RELATIVE_PATH: &str = "knowledge/composition_blueprints.json";
@@ -17,6 +19,17 @@ const PATH_ENV: &str = "MOTIFAI_COMPOSITION_BLUEPRINTS";
 const MODE_ENV: &str = "MOTIFAI_COMPOSITION_BLUEPRINT";
 const MAX_LIBRARY_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROMPT_CHARS: usize = 14_000;
+const MAX_DEBUG_LOG_BYTES: u64 = 4 * 1024 * 1024;
+
+static CACHED_BLUEPRINTS: OnceLock<Mutex<Option<CachedBlueprintLibrary>>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct CachedBlueprintLibrary {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
+    library: BlueprintLibrary,
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -528,7 +541,7 @@ fn render_archive_selection(
 
     if out.chars().count() > MAX_PROMPT_CHARS {
         let closing = "</OPTIONAL_COMPOSITION_BLUEPRINT>\n";
-        let keep = MAX_PROMPT_CHARS.saturating_sub(closing.chars().count() + 60);
+        let keep = MAX_PROMPT_CHARS.saturating_sub(closing.chars().count() + 64);
         out = out.chars().take(keep).collect();
         out.push_str("\n[Selected archive guidance compacted to the prompt budget.]\n");
         out.push_str(closing);
@@ -575,10 +588,25 @@ fn stable_hash(value: &str) -> u64 {
     hash
 }
 
+fn rotate_debug_log_if_needed(log_path: &Path) {
+    if let Ok(meta) = fs::metadata(log_path) {
+        if meta.len() > MAX_DEBUG_LOG_BYTES {
+            let backup = log_path.with_extension("log.1");
+            let _ = fs::rename(log_path, backup);
+        }
+    }
+}
+
 fn log_selection(stage: &str, detail: &str) {
     use std::io::Write;
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open("forge_debug.log") {
-        let _ = writeln!(file, "[BLUEPRINT:{}] {}", stage, detail);
+    let log_path = Path::new("forge_debug.log");
+    rotate_debug_log_if_needed(log_path);
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log_path) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{ts}] [BLUEPRINT:{stage}] {detail}");
     }
 }
 
@@ -603,9 +631,30 @@ fn load_library() -> Result<BlueprintLibrary, String> {
         if metadata.len() > MAX_LIBRARY_BYTES {
             return Err(format!("Blueprint library '{}' is {} bytes, above the {} byte safety limit.", path.display(), metadata.len(), MAX_LIBRARY_BYTES));
         }
+
+        let modified = metadata.modified().ok();
+        let len = metadata.len();
+        let cache_cell = CACHED_BLUEPRINTS.get_or_init(|| Mutex::new(None));
+        if let Ok(guard) = cache_cell.lock() {
+            if let Some(cached) = guard.as_ref() {
+                if cached.path == *path && cached.modified == modified && cached.len == len {
+                    return Ok(cached.library.clone());
+                }
+            }
+        }
+
         let content = fs::read_to_string(path).map_err(|e| format!("Could not read blueprint library '{}': {e}", path.display()))?;
         let library: BlueprintLibrary = serde_json::from_str(&content).map_err(|e| format!("Malformed composition blueprint JSON at '{}': {e}", path.display()))?;
         if library.blueprints.is_empty() { return Err(format!("Composition blueprint library '{}' has no blueprints.", path.display())); }
+
+        if let Ok(mut guard) = cache_cell.lock() {
+            *guard = Some(CachedBlueprintLibrary {
+                path: path.clone(),
+                modified,
+                len,
+                library: library.clone(),
+            });
+        }
         return Ok(library);
     }
     Err(format!("Composition blueprint library not found. Expected '{}' or set {} to an explicit path.", RELATIVE_PATH, PATH_ENV))

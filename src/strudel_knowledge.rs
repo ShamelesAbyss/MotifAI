@@ -14,6 +14,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 const KNOWLEDGE_RELATIVE_PATH: &str = "knowledge/strudel_production_library.json";
 const KNOWLEDGE_PATH_ENV: &str = "MOTIFAI_STRUDEL_KNOWLEDGE";
@@ -25,8 +26,18 @@ const DEFAULT_REFERENCE_CHAR_BUDGET: usize = 7_000;
 const MAX_INLINE_FIELD_CHARS: usize = 900;
 const MAX_QUERY_CHARS: usize = 24_000;
 const MAX_QUERY_TERM_WEIGHT: i32 = 18;
+const MAX_DEBUG_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
 static LOGGED_LOAD_DIAGNOSTICS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static CACHED_LIBRARY: OnceLock<Mutex<Option<CachedKnowledgeReport>>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct CachedKnowledgeReport {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
+    report: KnowledgeLoadReport,
+}
 
 /// One independently authored technique card. Field aliases preserve support for
 /// both the legacy array format and the richer versioned library format.
@@ -162,6 +173,18 @@ pub fn load_knowledge_library_from_path<P: AsRef<Path>>(path: P) -> KnowledgeLoa
         ));
         return report;
     }
+
+    let modified = metadata.modified().ok();
+    let len = metadata.len();
+    let cache_cell = CACHED_LIBRARY.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache_cell.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.path == path && cached.modified == modified && cached.len == len {
+                return cached.report.clone();
+            }
+        }
+    }
+
     let content = match fs::read_to_string(&path) {
         Ok(content) => content,
         Err(error) => {
@@ -169,7 +192,18 @@ pub fn load_knowledge_library_from_path<P: AsRef<Path>>(path: P) -> KnowledgeLoa
             return report;
         }
     };
-    parse_library_document(&content, Some(path), report)
+    let parsed = parse_library_document(&content, Some(path.clone()), report);
+    if parsed.loaded {
+        if let Ok(mut guard) = cache_cell.lock() {
+            *guard = Some(CachedKnowledgeReport {
+                path,
+                modified,
+                len,
+                report: parsed.clone(),
+            });
+        }
+    }
+    parsed
 }
 
 fn candidate_library_paths() -> Vec<PathBuf> {
@@ -432,7 +466,8 @@ fn push_warning(warnings: &mut Vec<String>, warning: String) {
 }
 
 /// Deterministic retrieval against vision, style, and optional compiler/runtime context.
-/// The current JSON is reread on every request so edits become available without restart.
+/// Uses an mtime/size-validated in-memory cache so file edits take effect immediately
+/// without re-parsing unchanged JSON on every retry attempt.
 pub fn retrieve_production_knowledge(
     user_vision: &str,
     style_direction: &str,
@@ -559,7 +594,16 @@ fn tokenize_segments(text: &str) -> Vec<Vec<String>> {
         .replace("hi-hat", "hihat")
         .replace("high-hat", "hihat")
         .replace("low-pass", "lowpass")
-        .replace("high-pass", "highpass");
+        .replace("high-pass", "highpass")
+        .replace("band-pass", "bandpass")
+        .replace("sub-bass", "subbass")
+        .replace("side-chain", "sidechain")
+        .replace("voice-leading", "voiceleading")
+        .replace("poly-rhythm", "polyrhythm")
+        .replace("poly-meter", "polymeter")
+        .replace("wave-table", "wavetable")
+        .replace("bit-crush", "bitcrush")
+        .replace("micro-tonal", "microtonal");
     let mut segments = Vec::new();
     let mut segment = Vec::new();
     let mut token = String::new();
@@ -593,23 +637,39 @@ fn canonicalize_token(token: &str) -> String {
     match token {
         "drums" | "drumming" => "drum".to_owned(),
         "beats" => "beat".to_owned(),
-        "rhythms" => "rhythm".to_owned(),
+        "rhythms" | "rhythmic" => "rhythm".to_owned(),
         "melodies" | "melodic" => "melody".to_owned(),
         "harmonies" | "harmonic" => "harmony".to_owned(),
         "synths" | "synthesizer" | "synthesizers" => "synth".to_owned(),
         "effects" => "effect".to_owned(),
         "transitions" => "transition".to_owned(),
-        "arpeggios" => "arpeggio".to_owned(),
-        "textures" => "texture".to_owned(),
-        "layers" => "layer".to_owned(),
+        "arpeggios" | "arpeggiated" | "arpeggiator" => "arpeggio".to_owned(),
+        "textures" | "textured" => "texture".to_owned(),
+        "layers" | "layered" => "layer".to_owned(),
         "chords" => "chord".to_owned(),
-        "filters" => "filter".to_owned(),
-        "samples" => "sample".to_owned(),
+        "voicings" => "voicing".to_owned(),
+        "scales" => "scale".to_owned(),
+        "filters" | "filtered" | "filtering" => "filter".to_owned(),
+        "samples" | "sampler" | "sampling" => "sample".to_owned(),
         "sliders" => "slider".to_owned(),
         "controls" => "control".to_owned(),
         "arrangements" => "arrangement".to_owned(),
         "variations" => "variation".to_owned(),
-        "loops" => "loop".to_owned(),
+        "loops" | "looping" => "loop".to_owned(),
+        "basses" | "bassline" | "basslines" => "bass".to_owned(),
+        "leads" => "lead".to_owned(),
+        "pads" => "pad".to_owned(),
+        "reverbs" => "reverb".to_owned(),
+        "delays" => "delay".to_owned(),
+        "envelopes" => "envelope".to_owned(),
+        "oscillators" => "oscillator".to_owned(),
+        "percussions" | "percussive" => "percussion".to_owned(),
+        "breakbeats" | "breaks" => "breakbeat".to_owned(),
+        "euclid" => "euclidean".to_owned(),
+        "xenharmonic" | "xenharmonics" => "microtonal".to_owned(),
+        "visualizers" | "visuals" => "visualizer".to_owned(),
+        "orbits" => "orbit".to_owned(),
+        "delimiters" => "delimiter".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -810,8 +870,19 @@ fn log_load_report(report: &KnowledgeLoadReport) {
     }
 }
 
+fn rotate_debug_log_if_needed(log_path: &Path) {
+    if let Ok(meta) = fs::metadata(log_path) {
+        if meta.len() > MAX_DEBUG_LOG_BYTES {
+            let backup = log_path.with_extension("log.1");
+            let _ = fs::rename(log_path, backup);
+        }
+    }
+}
+
 fn log_knowledge(stage: &str, detail: &str) {
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("forge_debug.log") {
+    let log_path = Path::new("forge_debug.log");
+    rotate_debug_log_if_needed(log_path);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs()).unwrap_or_default();
         let _ = writeln!(file, "[{timestamp}] [{stage}] {detail}");
@@ -937,5 +1008,15 @@ mod tests {
         assert!(reference.contains("Verification evidence:"));
         assert!(reference.contains("MotifAI embedded REPL"));
         assert!(reference.contains("2026-10-23"));
+    }
+
+    #[test]
+    fn production_aliases_and_compound_terms_canonicalize_cleanly() {
+        let terms = weighted_terms("basslines voicings euclid xenharmonic sub-bass", 3);
+        assert!(terms.contains_key("bass"));
+        assert!(terms.contains_key("voicing"));
+        assert!(terms.contains_key("euclidean"));
+        assert!(terms.contains_key("microtonal"));
+        assert!(terms.contains_key("subbass"));
     }
 }
