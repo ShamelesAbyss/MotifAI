@@ -1,132 +1,203 @@
-# 🌀 MOTIFAI 🌀
+# 🌀 MotifAI v6.8.0
 
 **An autonomous, local-AI symphonic song architect built on Rust and Strudel.**
 
-MotifAI bridges local Large Language Models (like Qwen, Mistral, and DeepSeek) with the Strudel.cc live-coding music environment. As of v6.4.0, it operates in a strict **"Pure Agentic Default"** mode—meaning zero hardcoded templates, zero preset loops, and zero hidden background steering.
+MotifAI bridges local large language models (LLMs), including Qwen2.5-Coder, Devstral, Mistral, and DeepSeek, with the Strudel.cc live-coding music environment.
 
-You feed it a musical vision and style DNA, and the agent autonomously structures, codes, and arranges a complete multi-movement electronic track in real-time. When you need inspiration, you can explicitly opt-in to advanced context tools like the **Golden Scorebook** and **Empirical Memory Advisory**.
+As of v6.8.0, MotifAI combines:
 
-Interface preview: https://github.com/user-attachments/assets/2628abad-2a76-4080-bed7-4b044ed9a2d2
+- A work-mode-aware Composition Orchestrator.
+- The 65-architecture Master Composition & Performance Palette.
+- Live NDJSON token streaming with VRAM-aware inference profiles.
+- A two-stage verification loop: Conservative Lexical Preflight followed by Embedded Strudel REPL Runtime Evaluation.
 
-## ✨ CORE FEATURES ✨
+Describe your musical vision and style DNA, and MotifAI autonomously structures, codes, validates, and arranges an executable Strudel JavaScript composition in real time. You control the creative steering: use **Smart Auto**, switch to **Free-Form** for zero blueprint injection, or opt in to **Golden Scorebook** tracks and **Empirical Memory Advisory** whenever you choose[cite: 3, 6, 7, 10].
 
-* 🧠 **Pure Agentic Composition (Default):** Builds full songs that genuinely evolve over time using Strudel's architecture. No forced structure—just raw AI creativity guided by your prompt.
+**Interface preview:** [View the MotifAI interface](https://github.com/user-attachments/assets/2628abad-2a76-4080-bed7-4b044ed9a2d2)
 
-* 📀 **Opt-In Golden Scorebook:** Press Ctrl+B to open an interactive overlay managing your knowledge/golden_tracks folder. Pin specific tracks as reference material or let the SplitMix64 stochastic engine rotate through them. *Golden Tracks are completely disabled until you explicitly turn them on (Ctrl+T).*
+---
 
-* 📚 **Strudel Production Intelligence:** Context-aware technique retrieval dynamically pulls syntax and synthesis cards from your production library based on your current brief.
+## ✨ Core Features
 
-* 🗄️ **Conditional Empirical Memory:** Learns your preferences via explicit Like (Ctrl+Y) and Revise (Ctrl+N) signals, but only injects past findings into the AI's prompt when you enable the Memory Advisory (Ctrl+A).
+### 🎨 Master Composition & Performance Palette · `Ctrl+P`
 
-* 🛡️ **Conservative Lexical Preflight:** A non-destructive AST checker ensures balanced syntax and active audio triggers without silently rewriting the AI's mixing or harmonic choices.
+Browse and select from **65 composition architectures** spanning small, medium, extended, and concert scales, **31 instrument role palettes**, **13 production palettes**, and **11 visual telemetry families**.
 
-* 🔒 **100% Local & Private (64k Context):** Runs entirely on your own hardware via Ollama, pushing a massive 64k token context window for deep, complex tracking. No cloud APIs, no subscriptions.
+Choose one of three modes:
 
-## 🛠️ PREREQUISITES & INSTALLATION 🛠️
+- **Smart Auto:** Matches one flexible architecture seed to each request.
+- **Free-Form (OFF):** Uses zero blueprint or palette injection.
+- **Pinned Blueprint:** Locks a specific architecture through `Ctrl+P` or by writing `blueprint:` in your prompt.
 
-To run MotifAI, you need Rust and Ollama installed on your machine.
+### 🎼 Work-Mode-Aware Orchestration
 
-### STEP 1: INSTALL OLLAMA (THE AI ENGINE)
+MotifAI automatically classifies each request into one of four work modes: **New Composition**, **Targeted Edit**, **Composition Evolution**, or **Technical Repair**. Narrow edit requests preserve unrelated working stems, while evolution passes inspect existing stem roles and develop the arrangement without freezing section maps.
 
-Ollama runs the local AI models that power the MotifAI composer.
+### ⚡ VRAM-Aware Inference Profiles & Live Streaming
 
-**For Windows:**
+MotifAI automatically prioritizes fast, GPU-resident 14B coder models, such as `qwen2.5-coder:14b`, for interactive responsiveness on GPUs with 8 GB of VRAM. Larger 24B–32B models remain available through `Ctrl+M`.
 
-1. Download and install Ollama from https://ollama.com/download/windows
+Tokens stream live over NDJSON with real-time tokens-per-second telemetry and task-aware context/output caps. Available profiles are **interactive-fast**, **interactive-extended**, **deep-balanced**, and **deep-extended**.
 
-2. **Crucial Optimization for 64k Context:** To prevent the AI from timing out and to unlock the full 64k token memory for massive concert builds, you must set two System Environment Variables:
+### 🔬 Two-Stage Verification & Stateful Surgical Repair
 
-   * Press Win + R, type sysdm.cpl, hit Enter, and click Environment Variables.
+Every candidate score must first pass **Conservative Lexical Preflight**, which checks balanced delimiters, mini-notation brackets, tempo presence, wired sliders, and active musical stems. It also repairs standalone `@number` filter strings, such as `.lpf("@200")` into `.lpf(200)`, without rewriting your melodies.
 
-   * Add a New variable: OLLAMA_NUM_CTX with value 65536
+Candidates that pass preflight are then evaluated inside the pinned `@strudel/repl@1.3.0` browser runtime. If preflight or runtime evaluation fails, MotifAI feeds the exact error and failed candidate code into a low-temperature repair pass at `0.25`.
 
-   * Add a New variable: OLLAMA_KEEP_ALIVE with value 20m
+### 📀 Opt-In Golden Scorebook · `Ctrl+B` / `Ctrl+T`
 
-   * Restart your computer or terminal to apply.
+Manage your local `knowledge/golden_tracks` folder through an interactive overlay. Pin up to **two reference tracks** or use weighted stochastic rotation. Golden Tracks are **OFF by default** and are never injected unless you explicitly enable them.
 
-**For Linux:**
-Run the official install script in your terminal: curl -fsSL https://ollama.com/install.sh | sh
+### 📚 Strudel Production Intelligence
 
-### STEP 2: PULL THE RECOMMENDED AI MODEL
+Frequency-weighted, phrase-aware retrieval dynamically pulls up to **three curated Strudel syntax and DSP cards** from `knowledge/strudel_production_library.json`, based on your vision, style DNA, and any active compiler/runtime errors.
 
-Open your terminal and download a capable coding model. qwen2.5-coder:14b or qwen2.5-coder:32b are highly recommended for Strudel syntax:
+### 🗄️ Conditional Empirical Memory · `Ctrl+A` / `Ctrl+Y` / `Ctrl+N`
 
-* Command: ollama pull qwen2.5-coder:14b
+MotifAI records AST and runtime outcomes alongside explicit **Like** (`Ctrl+Y`) and **Revise** (`Ctrl+N`) signals. Prompt injection stays **OFF by default** until you turn Memory Advisory on with `Ctrl+A`.
 
-### STEP 3: INSTALL RUST & MOTIFAI
+### 🕰️ Session Time Machine & Non-Destructive Exports
 
-1. Install Rust via https://rustup.rs if you haven't already.
+Step backward with `Ctrl+Z` and forward with `Ctrl+U` through generated and evolved scores. Cancel an in-flight generation safely with `Esc`. Use `Ctrl+S` to save both `masterpiece.strudel.js` and timestamped backups in `exports/`.
 
-2. Clone this repository and launch the Forge:
+### 🔒 Hardened Local Studio & Safe Web Reference Scraping
 
-   * Command 1: git clone https://github.com/ShamelesAbyss/MotifAI.git
+MotifAI serves the local Visual Studio at `127.0.0.1:7777` using Base64-only editor hydration to prevent HTML comment injection, token-verified runtime reports, and client heartbeat tracking.
 
-   * Command 2: cd MotifAI
+Pasted HTTP(S) reference URLs are streamed with a **256 KB cap**, stripped of script/style tags, blocked from private/loopback networks, and isolated as untrusted reference data.
 
-   * Command 3: cargo run --release
+---
 
-## 🖥️ RUNNING THE OLLAMA SERVER MANUALLY 🖥️
+## 🛠️ Prerequisites & Installation
 
-By default, Ollama runs in the background. However, if you are generating massive 96-cycle stadium sets or using heavy 32B models, you might want to run the server manually in a dedicated terminal to monitor the logs and force the extended memory variables on the fly.
+You need **Rust** and **Ollama** installed to run MotifAI.
 
-Ensure the background Ollama app is closed first (right-click the tray icon and exit).
+### Step 1: Install Ollama
 
-**For Windows (PowerShell):**
-Type: \$env:OLLAMA_NUM_CTX="65536"
-Type: \$env:OLLAMA_KEEP_ALIVE="20m"
-Type: ollama serve
+**Windows:** Download and install Ollama from [ollama.com/download/windows](https://ollama.com/download/windows).
 
-**For Linux / macOS (Bash):**
-Type: OLLAMA_NUM_CTX=65536 OLLAMA_KEEP_ALIVE=20m ollama serve
+**Linux:** Run the official install script in your terminal:
 
-## 🎛️ HOW TO USE THE FORGE 🎛️
+`curl -fsSL https://ollama.com/install.sh | sh`
 
-When you run MotifAI, you will be presented with a Terminal User Interface (TUI) split into input panes. Use Tab to navigate between panes.
+#### Recommended environment settings: keep-alive & context
 
-1. **Pane \[1\] Agentic Musical Vision:** Describe the song structure, movements, energy levels, and specific melodies or drops you want.
+MotifAI v6.8.0 automatically sizes context windows by model class:
 
-2. **Pane \[2\] Style DNA:** Detail the genre, artist influences, specific instrumentation, or paste a YouTube/Web URL for the AI to scrape and reference.
+- **14B models:** 32,768 tokens.
+- **24B–32B models:** 16,384–24,576 tokens.
 
-3. **Pane \[3\] Autonomous Score:** The raw, generated Strudel JavaScript code.
+These settings are intended to help GPUs with 8 GB of VRAM avoid stalling or spilling excessive KV cache into system RAM.
 
-## ⌨️ KEYBINDINGS ⌨️
+To keep models warm in memory between runs on Windows:
 
-### Generation & Evolution
+1. Press `Win + R`, type `sysdm.cpl`, press Enter, and select **Environment Variables**.
+2. Add a User variable named `OLLAMA_KEEP_ALIVE` with the value `-1` or `20m`.
+3. Fully quit Ollama from the Windows system tray, then relaunch it.
 
-* `Ctrl+G` or `F5` : **GENERATE** - Instructs the AI to build a brand new song from scratch based on your prompts.
+### Step 2: Pull the Recommended AI Model
 
-* `Ctrl+E` : **EVOLVE** - Feeds the current score back to the AI to expand, add new sections, or mutate the arrangement.
+Open a terminal and pull a coding model. **`qwen2.5-coder:14b`** is the recommended default for fast, GPU-resident interactive composition on GPUs with 8 GB or more of VRAM. You can also install **`qwen2.5-coder:32b`** for offline or deep-composition passes.
 
-### Architecture Controls (Opt-In Tools)
+- **Recommended interactive default:** `ollama pull qwen2.5-coder:14b`
+- **Optional heavy model:** `ollama pull qwen2.5-coder:32b`
 
-* `Ctrl+T` : **TOGGLE GOLDEN TRACKS** - Turns Golden Scorebook reference injection ON/OFF.
+### Step 3: Install Rust & Launch MotifAI
 
-* `Ctrl+B` : **SCOREBOOK OVERLAY** - Opens the interactive Golden Scorebook. Use Up/Down to navigate, and Space/Enter to pin up to 2 specific reference tracks for the next generation.
+1. Install Rust from [rustup.rs](https://rustup.rs) if you have not already.
+2. Clone the repository:
+   `git clone https://github.com/ShamelesAbyss/MotifAI.git`
+3. Enter the project directory:
+   `cd MotifAI`
+4. Run the verification test suite:
+   `cargo test`
+5. Launch MotifAI:
+   `cargo run --release`
 
-* `Ctrl+A` : **TOGGLE MEMORY ADVISORY** - Turns the Empirical Memory Advisory ON/OFF for the system prompt.
+---
 
-* `Ctrl+R` : **RESCAN** - Rescans the knowledge/golden_tracks folder for new files.
+## ⚙️ Optional Environment Overrides
 
-### Feedback & Memory
+MotifAI works out of the box with zero configuration, but the following environment variables are available for custom setups:
 
-* `Ctrl+Y` : **LIKE (ENDORSE)** - Explicitly marks the active composition as a success in the memory database.
+- **`STRUDEL_MODEL`**: Overrides the initial Ollama model selected at startup. Default: `qwen2.5-coder:14b`.
+- **`MOTIFAI_COMPOSITION_BLUEPRINT`**: Sets the initial Master Palette mode to `auto` (default), `off` (Free-Form), or a specific blueprint ID.
+- **`MOTIFAI_NUM_CTX`**: Overrides the automatic context window size. Valid range: `4096` to `131072`.
+- **`MOTIFAI_NUM_PREDICT`**: Overrides the maximum generated token cap per pass. Use `-1` for unlimited output or a value from `512` to `32768`.
+- **`MOTIFAI_STRUDEL_KNOWLEDGE`**: Points to a custom production-knowledge JSON file. Default: `knowledge/strudel_production_library.json`.
+- **`MOTIFAI_COMPOSITION_BLUEPRINTS`**: Points to a custom blueprint-archive JSON file. Default: `knowledge/composition_blueprints.json`.
 
-* `Ctrl+N` : **REVISE (REJECT)** - Explicitly marks the active composition for revision in the memory database.
+---
 
-* `Ctrl+S` : **SAVE** - Saves the current generated code to masterpiece.strudel.js in your project folder.
+## 🎛️ How to Use the Forge
 
-### Playback & Studio
+When MotifAI launches, it presents a three-pane Terminal User Interface (TUI). Press `Tab` to cycle focus between panes.
 
-* `Ctrl+L` : **LAUNCH STUDIO** - Opens the generated code in a local browser studio (http://127.0.0.1:7777) with interactive visualizers. Press Ctrl+Enter in the browser to play.
+### Pane 1: Agentic Musical Vision
 
-* `Ctrl+O` : **OPEN STRUDEL.CC** - Pushes the raw code directly to the public Strudel REPL at https://strudel.cc/#.
+Describe your desired composition, movements, energy contour, melodies, bridges, solos, live sliders, or targeted edits. You can also include `blueprint:` to request a specific architecture inline.
 
-* `Left` / `Right` : **NUDGE TEMPO** - Adjusts the setcps() tempo up or down directly from the TUI.
+### Pane 2: Style DNA / Reference Scraper
 
-### Application
+Specify genre, synthesis techniques, and rhythmic feel, or paste any public web/YouTube URL to scrape metadata context into the prompt.
 
-* `Ctrl+M` : **CYCLE MODELS** - Switches between installed Ollama models (e.g., Qwen, Mistral, DeepSeek).
+### Pane 3: Autonomous Agentic Strudel Score
 
-* `Esc` : **EXIT** - Closes overlays or exits MotifAI.
+View and scroll through the generated Strudel JavaScript score, nudge the tempo in real time, or step through your Undo/Redo generation history.
 
-**Disclaimer:** MotifAI is an experimental algorithmic composition tool. Generated Strudel code is heavily dependent on the chosen local LLM's understanding of JavaScript and audio synthesis.
+---
+
+## ⌨️ Keybindings
+
+### Generation, Evolution & History
+
+- **`Ctrl+G` or `F5` · Compose:** Builds a brand-new composition from the current Musical Vision and Style DNA.
+- **`Ctrl+E` · Evolve:** Feeds the active score back into the orchestrator to develop sections, transform motifs, or apply targeted edits.
+- **`Ctrl+Z` · Undo Score:** Returns to the previous score snapshot in the session history and syncs it to the Studio.
+- **`Ctrl+U` · Redo Score:** Moves forward to the next score snapshot in the session history and syncs it to the Studio.
+- **`Esc` · Cancel / Close / Exit:** Closes an open modal overlay, aborts an in-flight generation without quitting, or exits MotifAI when idle.
+
+### Master Palette & Context Controls
+
+- **`Ctrl+P` · Master Palette Overlay:** Opens the Master Composition & Performance Palette browser. Use **Up/Down** to browse, **Enter/Space** to apply, **A** for Smart Auto, **O** for Free-Form (OFF), and **R** to rescan.
+- **`Ctrl+T` · Toggle Golden Tracks:** Turns Golden Scorebook reference injection ON or OFF.
+- **`Ctrl+B` · Golden Scorebook Overlay:** Opens the interactive Golden Scorebook for `knowledge/golden_tracks`. Use **Up/Down** to navigate, **Space/Enter** to pin or unpin up to two tracks, **T** to toggle Golden mode, **C** to clear pins, and **R** to rescan.
+- **`Ctrl+A` · Toggle Memory Advisory:** Turns Empirical Memory Advisory prompt injection ON or OFF.
+- **`Ctrl+R` · Rescan Scorebook:** Rescans `knowledge/golden_tracks` for newly added `.strudel.js`, `.js`, or `.mjs` files.
+
+### Playback & Local Studio
+
+- **`Ctrl+L` · Launch Local Studio:** Opens the embedded Visual Studio in your browser at [http://127.0.0.1:7777/studio](http://127.0.0.1:7777/studio), with automatic REPL runtime evaluation, interactive sliders, visualizers, and theme switching. Press `Ctrl+Enter` in the browser tab to audition audio.
+- **`Ctrl+O` · Open on Strudel.cc:** Pushes the current score directly into the full public Strudel REPL at [strudel.cc](https://strudel.cc/#).
+- **Left/Right Arrow keys in Pane 3 · Nudge Tempo:** Adjust the top-level `setcps()` tempo down or up by `0.02` CPS (approximately 4.8 BPM) directly from the TUI.
+- **Up/Down Arrow keys in Pane 3 · Scroll Score:** Scroll through the generated Strudel code.
+
+### Feedback, Saving & Model Selection
+
+- **`Ctrl+Y` · Like (Endorse):** Records explicit user approval for the active composition in Sonic Intelligence memory.
+- **`Ctrl+N` · Revise (Reject):** Records explicit revision feedback for the active composition in Sonic Intelligence memory.
+- **`Ctrl+S` · Save & Archive:** Writes the active score to `masterpiece.strudel.js` and saves a non-destructive timestamped copy to `exports/`.
+- **`Ctrl+M` · Cycle Models:** Switches between all auto-discovered local Ollama models and displays the active inference profile.
+
+---
+
+## 🔍 Verification & Evidence Transparency
+
+MotifAI maintains strict separation between verification stages across the TUI, logs (`forge_debug.log`), and empirical memory[cite: 3, 4, 6, 10].
+
+### 1. Static Preflight Passed
+
+The source passed lexical delimiter, mini-notation, slider-arithmetic, and stem-usage checks in `strudel_ast.rs`[cite: 3, 8].
+
+### 2. Embedded REPL Evaluation Passed
+
+The pinned `@strudel/repl@1.3.0` browser instance executed `setCode()` and `evaluate()` without throwing a syntax or evaluation error.
+
+### 3. Auditioned / User Approved
+
+Passing static preflight and REPL evaluation does **not** automatically prove audible output[cite: 3, 6, 8, 10]. Press `Ctrl+Enter` in the Studio to audition playback, then use `Ctrl+Y` to endorse compositions you genuinely like.
+
+---
+
+*Disclaimer: MotifAI is an experimental algorithmic composition studio. Musicality and synthesis complexity depend on the selected local LLM and your hardware environment.*
