@@ -43,8 +43,11 @@ const LOCAL_PORT: u16 = 7777;
 const OLLAMA_PORT: u16 = 11434;
 
 const STRUDEL_WEB_HASH: &str = concat!("https", "://", "strudel.cc/#");
-const STRUDEL_REPL_CDN: &str = concat!("https", "://", "unpkg.com/@strudel/repl@latest");
+// Pin the embedded REPL version so runtime evaluation behavior is reproducible.
+const STRUDEL_REPL_CDN: &str = concat!("https", "://", "unpkg.com/@strudel/repl@1.3.0");
 const STRUDEL_HOME_URL: &str = concat!("https", "://", "strudel.cc");
+const MAX_GENERATION_ATTEMPTS: usize = 5;
+const RUNTIME_VERIFY_WAIT_SECS: u64 = 30;
 
 const MAX_PINNED_GOLDEN_TRACKS: usize = 2;
 const MAX_PINNED_ADVISORY_CHARS: usize = 8_000;
@@ -192,9 +195,22 @@ struct ModelInfo {
     name: String,
 }
 
+#[derive(Clone, Debug)]
+struct RuntimeValidationReport {
+    candidate_id: String,
+    status: String,
+    detail: String,
+}
+
 enum BotEvent {
     ModelsDiscovered(Vec<String>),
     StatusUpdate(String),
+    RuntimeCheckRequested {
+        code: String,
+        candidate_id: String,
+        attempt: usize,
+        open_studio: bool,
+    },
     Generated(String, ExternalAstAnalysis, Option<String>, Vec<String>),
     Error(String),
 }
@@ -220,6 +236,7 @@ struct App {
     golden_track_cursor: usize,
     pinned_golden_tracks: Vec<String>,
     last_injected_tracks: Vec<String>,
+    runtime_studio_opened: bool,
 }
 
 impl App {
@@ -266,6 +283,7 @@ impl App {
             golden_track_cursor: 0,
             pinned_golden_tracks: Vec::new(),
             last_injected_tracks: Vec::new(),
+            runtime_studio_opened: false,
         }
     }
 
@@ -561,7 +579,11 @@ fn open_browser_url(url: &str) {
     }
 }
 
-async fn start_local_studio_server(shared_code: Arc<RwLock<String>>) {
+async fn start_local_studio_server(
+    shared_code: Arc<RwLock<String>>,
+    shared_candidate_id: Arc<RwLock<String>>,
+    shared_runtime_report: Arc<RwLock<Option<RuntimeValidationReport>>>,
+) {
     let addr = format!("{}:{}", LOOPBACK_IP, LOCAL_PORT);
 
     let listener = match TcpListener::bind(&addr).await {
@@ -581,6 +603,8 @@ async fn start_local_studio_server(shared_code: Arc<RwLock<String>>) {
     loop {
         if let Ok((mut socket, _)) = listener.accept().await {
             let code_ref = shared_code.clone();
+            let candidate_id_ref = shared_candidate_id.clone();
+            let runtime_report_ref = shared_runtime_report.clone();
 
             tokio::spawn(async move {
                 let mut buf = [0u8; 8192];
@@ -595,14 +619,54 @@ async fn start_local_studio_server(shared_code: Arc<RwLock<String>>) {
                 let code = code_ref.read().await.clone();
                 let b64 = BASE64.encode(code.as_bytes());
 
-                let response = if first_line.contains("GET /api/code") {
+                let response = if first_line.starts_with("GET /api/runtime-report?") {
+                    let candidate_id = query_parameter_from_request_line(first_line, "candidate_id");
+                    let status = query_parameter_from_request_line(first_line, "status");
+                    let detail = query_parameter_from_request_line(first_line, "detail")
+                        .unwrap_or_else(|| "No diagnostic detail supplied.".to_string());
+
+                    if let (Some(candidate_id), Some(status)) = (candidate_id, status) {
+                        if matches!(status.as_str(), "pass" | "fail" | "unavailable") {
+                            let active_id = candidate_id_ref.read().await.clone();
+                            // Ignore late reports from a superseded candidate.
+                            if candidate_id == active_id && !candidate_id.is_empty() {
+                                let bounded_detail: String = detail.chars().take(1800).collect();
+                                *runtime_report_ref.write().await = Some(RuntimeValidationReport {
+                                    candidate_id: candidate_id.clone(),
+                                    status: status.clone(),
+                                    detail: bounded_detail.clone(),
+                                });
+                                log_diag(
+                                    "STRudel_RUNTIME_REPORT",
+                                    &format!("candidate={} status={} detail={}", candidate_id, status, bounded_detail),
+                                );
+                            }
+                        }
+                    }
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n".to_string()
+                } else if first_line.starts_with("GET /api/candidate ") || first_line.starts_with("GET /api/candidate?") {
+                    // Read the ID first. The generator publishes code before publishing its new ID;
+                    // a stale ID/code pair is rejected by the report endpoint and then polled again.
+                    let candidate_id = candidate_id_ref.read().await.clone();
+                    let latest_code = code_ref.read().await.clone();
+                    let body = serde_json::json!({
+                        "candidate_id": candidate_id,
+                        "code": latest_code,
+                    })
+                    .to_string();
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
+                        body.as_bytes().len(), body
+                    )
+                } else if first_line.contains("GET /api/code") {
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
                         code.as_bytes().len(),
                         code
                     )
                 } else if first_line.contains("GET /studio") {
-                    let body = build_embedded_studio_html(&code, &b64);
+                    let candidate_id = candidate_id_ref.read().await.clone();
+                    let body = build_embedded_studio_html(&code, &b64, &candidate_id);
 
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
@@ -635,6 +699,45 @@ fn url_encode_b64(b64: &str) -> String {
         .replace('=', "%3D")
 }
 
+fn query_parameter_from_request_line(request_line: &str, key: &str) -> Option<String> {
+    let target = request_line.split_whitespace().nth(1)?;
+    let query = target.split_once('?')?.1;
+    query.split('&').find_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        (percent_decode_query_component(name) == key)
+            .then(|| percent_decode_query_component(value))
+    })
+}
+
+fn percent_decode_query_component(input: &str) -> String {
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                output.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
 fn build_redirect_html(b64: &str) -> String {
     format!(
         r##"<!DOCTYPE html>
@@ -659,8 +762,13 @@ fn build_redirect_html(b64: &str) -> String {
     )
 }
 
-fn build_embedded_studio_html(code: &str, b64: &str) -> String {
+fn build_embedded_studio_html(code: &str, b64: &str, candidate_id: &str) -> String {
     let safe_code = code.replace("-->", "-- >");
+    let runtime_script = build_runtime_validation_script(
+        b64,
+        candidate_id,
+        &local_studio_endpoint("/api/runtime-report"),
+    );
 
     format!(
         r##"<!DOCTYPE html>
@@ -698,8 +806,8 @@ fn build_embedded_studio_html(code: &str, b64: &str) -> String {
   </div>
 </header>
 <div class="hint">
-  <span>⚡ <b>Visualizers Available</b> Click inside the editor and press <b>Ctrl+Enter</b> to play.</span>
-  <span>Empirical Memory: <b>Active</b></span>
+  <span>⚡ <b>Runtime Check</b> Code is evaluated automatically; press <b>Ctrl+Enter</b> to audition.</span>
+  <span>Strudel: <b id="runtime-status">Waiting for embedded REPL...</b></span>
 </div>
 <strudel-editor id="repl">
 <!--
@@ -716,10 +824,149 @@ fn build_embedded_studio_html(code: &str, b64: &str) -> String {
     document.documentElement.style.setProperty('--panel', panel);
   }}
 </script>
+{}
 </body>
 </html>"##,
-        STRUDEL_REPL_CDN, safe_code, b64, STRUDEL_WEB_HASH
+        STRUDEL_REPL_CDN, safe_code, b64, STRUDEL_WEB_HASH, runtime_script
     )
+}
+
+fn build_runtime_validation_script(initial_code_b64: &str, initial_candidate_id: &str, report_url: &str) -> String {
+    let script = r#"<script>
+(() => {
+  const REPORT_URL = "__REPORT_URL__";
+  const INITIAL_CANDIDATE_ID = "__CANDIDATE_ID__";
+  const INITIAL_CODE_B64 = "__CODE_B64__";
+  const statusLabel = document.getElementById("runtime-status");
+  let lastHandledCandidateId = "";
+  let validationInProgress = false;
+
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const decodeBase64Utf8 = (value) => new TextDecoder().decode(
+    Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
+  );
+  const looksLikeEvaluationError = (message) =>
+    /eval error|parse error|syntaxerror|referenceerror|typeerror|not defined|is not a function|cannot read properties|failed to parse|mini-notation.*error/i.test(message);
+
+  async function publishReport(candidateId, resultStatus, detail) {
+    if (statusLabel) statusLabel.textContent = resultStatus.toUpperCase() + ": " + String(detail).slice(0, 180);
+    const url = REPORT_URL
+      + "?candidate_id=" + encodeURIComponent(candidateId)
+      + "&status=" + encodeURIComponent(resultStatus)
+      + "&detail=" + encodeURIComponent(String(detail).slice(0, 1500));
+    try {
+      await fetch(url, { method: "GET", cache: "no-store", keepalive: true });
+    } catch (error) {
+      if (statusLabel) statusLabel.textContent = "REPORT UNAVAILABLE: local bridge request failed";
+    }
+  }
+
+  async function validateCandidate(candidateId, code) {
+    if (!candidateId || candidateId === lastHandledCandidateId || validationInProgress) return;
+    lastHandledCandidateId = candidateId;
+    validationInProgress = true;
+    if (statusLabel) statusLabel.textContent = "Evaluating candidate " + candidateId + "...";
+
+    let replElement = document.getElementById("repl");
+    let repl = null;
+    const editorDeadline = Date.now() + 22000;
+    while (Date.now() < editorDeadline) {
+      repl = replElement && replElement.editor;
+      if (repl && typeof repl.setCode === "function" && typeof repl.evaluate === "function") break;
+      await wait(250);
+    }
+
+    if (!repl || typeof repl.setCode !== "function" || typeof repl.evaluate !== "function") {
+      await publishReport(candidateId, "unavailable", "The embedded Strudel REPL did not expose setCode/evaluate before the runtime-check deadline. Static preflight passed, but runtime is unverified.");
+      validationInProgress = false;
+      return;
+    }
+
+    const diagnostics = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    const captureConsole = (kind, args) => {
+      const message = args.map((value) => {
+        if (value instanceof Error) return value.stack || value.message;
+        if (typeof value === "string") return value;
+        try { return JSON.stringify(value); } catch (_) { return String(value); }
+      }).join(" ");
+      if (looksLikeEvaluationError(message)) diagnostics.push(kind + ": " + message);
+    };
+    const wrappedWarn = (...args) => { captureConsole("console.warn", args); originalWarn.apply(console, args); };
+    const wrappedError = (...args) => { captureConsole("console.error", args); originalError.apply(console, args); };
+    const onWindowError = (event) => {
+      const message = String(event && (event.error || event.message) || "");
+      if (looksLikeEvaluationError(message)) diagnostics.push("window.error: " + message);
+    };
+    const onUnhandledRejection = (event) => {
+      const reason = event && event.reason;
+      const message = reason instanceof Error ? (reason.stack || reason.message) : String(reason || "");
+      if (looksLikeEvaluationError(message)) diagnostics.push("unhandledrejection: " + message);
+    };
+
+    console.warn = wrappedWarn;
+    console.error = wrappedError;
+    window.addEventListener("error", onWindowError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    try {
+      await Promise.resolve(repl.setCode(code));
+      await wait(100);
+      await Promise.resolve(repl.evaluate());
+      // Strudel may report evaluator errors through console diagnostics rather than rejecting evaluate().
+      await wait(1000);
+      if (diagnostics.length > 0) {
+        await publishReport(candidateId, "fail", diagnostics.slice(0, 4).join(" | "));
+      } else {
+        await publishReport(candidateId, "pass", "Embedded Strudel evaluate() completed without an observed syntax/evaluation error. Playback and audible output still require audition.");
+      }
+    } catch (error) {
+      await publishReport(candidateId, "fail", error && (error.stack || error.message) || String(error));
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+      window.removeEventListener("error", onWindowError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+      validationInProgress = false;
+    }
+  }
+
+  async function pollLatestCandidate() {
+    try {
+      const response = await fetch("/api/candidate?ts=" + Date.now(), { cache: "no-store" });
+      if (response.ok) {
+        const candidate = await response.json();
+        if (candidate && candidate.candidate_id && candidate.candidate_id !== lastHandledCandidateId && !validationInProgress) {
+          await validateCandidate(candidate.candidate_id, candidate.code || "");
+        }
+      }
+    } catch (_) {
+      // A failed poll is transient; continue polling without changing the score.
+    } finally {
+      setTimeout(pollLatestCandidate, 650);
+    }
+  }
+
+  async function startRuntimeChecks() {
+    if (INITIAL_CANDIDATE_ID) {
+      try { await validateCandidate(INITIAL_CANDIDATE_ID, decodeBase64Utf8(INITIAL_CODE_B64)); }
+      catch (error) { await publishReport(INITIAL_CANDIDATE_ID, "unavailable", String(error)); }
+    }
+    pollLatestCandidate();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startRuntimeChecks, { once: true });
+  } else {
+    startRuntimeChecks();
+  }
+})();
+</script>"#;
+
+    script
+        .replace("__REPORT_URL__", report_url)
+        .replace("__CANDIDATE_ID__", initial_candidate_id)
+        .replace("__CODE_B64__", initial_code_b64)
 }
 
 async fn discover_ollama_models(tx: mpsc::Sender<BotEvent>) {
@@ -796,6 +1043,9 @@ async fn generate_strudel_track(
     empirical_advisory: String,
     curated_track_advisory: String,
     curated_track_names: Vec<String>,
+    shared_code: Arc<RwLock<String>>,
+    shared_candidate_id: Arc<RwLock<String>>,
+    shared_runtime_report: Arc<RwLock<Option<RuntimeValidationReport>>>,
     tx: mpsc::Sender<BotEvent>,
 ) {
     let endpoint = ollama_endpoint("/api/generate");
@@ -824,8 +1074,12 @@ async fn generate_strudel_track(
     }
     let mut last_ast_error: Option<String> = None;
     let mut last_warnings = Vec::new();
+    let mut previous_candidates: Vec<String> = Vec::new();
+    let mut runtime_check_started = false;
 
-    for attempt in 1..=2 {
+    // Repair is bounded and evidence-driven: preflight failures and actual REPL
+    // evaluation errors feed the next prompt instead of accepting the first plausible string.
+    for attempt in 1..=MAX_GENERATION_ATTEMPTS {
         let seed = fresh_entropy_seed().wrapping_add((attempt as u64) * 7919);
 
         let orchestration_dna = orchestrator::build_orchestration_directive(
@@ -838,8 +1092,8 @@ async fn generate_strudel_track(
 
         let error_feedback = match &last_ast_error {
             Some(err) => format!(
-                "\n\nCRITICAL AST/VALIDATION/CLONE FEEDBACK FROM PREVIOUS PASS: {}\n\
-                 Address the specific reported issue. Repetition and callbacks are valid when musically intentional; do not eliminate motifs merely to force uniqueness. Develop material where the reported issue actually warrants it.",
+                "\n\nMANDATORY REPAIR FEEDBACK FROM THE PREVIOUS CANDIDATE:\n{}\n\
+                 Fix the earliest reported defect first. Preserve all known-good musical material and the composition's identity. Do not merely paraphrase the diagnostic, do not repeat the failed construct, and do not rewrite the whole arrangement to fix a local syntax/runtime problem. Return a complete replacement score only.",
                 err
             ),
             None => String::new(),
@@ -899,10 +1153,12 @@ async fn generate_strudel_track(
             ),
         };
 
+        // A clean first pass favors reliable executable structure. Once a concrete
+        // defect exists, low-temperature repair is more useful than a more chaotic rewrite.
         let temp = if attempt == 1 {
-            if existing_code.is_some() { 0.65 } else { 0.62 }
+            if existing_code.is_some() { 0.45 } else { 0.40 }
         } else {
-            0.72
+            0.25
         };
 
         let system_prompt = get_strudel_system_prompt(
@@ -930,8 +1186,8 @@ async fn generate_strudel_track(
         if attempt > 1 {
             let _ = tx
                 .send(BotEvent::StatusUpdate(format!(
-                    "Agent refining score via '{}' (Attempt {}/2, temp={:.2})...",
-                    model, attempt, temp
+                    "Agent refining score via '{}' (Attempt {}/{}, temp={:.2})...",
+                    model, attempt, MAX_GENERATION_ATTEMPTS, temp
                 )))
                 .await;
         }
@@ -967,31 +1223,120 @@ async fn generate_strudel_track(
                                         continue;
                                     }
 
+                                    if previous_candidates.iter().any(|previous| previous == &healed_code) {
+                                        let duplicate = "DUPLICATE RETRY CANDIDATE: the model repeated a previously rejected score verbatim. Make a technical correction to the reported defect instead of returning the same source again.".to_string();
+                                        log_diag("DUPLICATE_RETRY_REJECTED", &duplicate);
+                                        last_warnings.push(duplicate.clone());
+                                        last_ast_error = Some(duplicate);
+                                        continue;
+                                    }
+                                    previous_candidates.push(healed_code.clone());
+
                                     log_diag(
-                                        "AST_HEAL_OK",
+                                        "STATIC_PREFLIGHT_PASS",
                                         &format!(
-                                            "Agentic score compiled & validated: {} bytes (seed={})",
-                                            healed_code.len(),
-                                            seed
+                                            "Lexical/structural preflight passed: {} bytes (seed={}); awaiting embedded Strudel evaluation.",
+                                            healed_code.len(), seed
                                         ),
                                     );
 
-                                    let ast_analysis = strudel_ast::analyze_ast_health(
-                                        &healed_code,
-                                        last_warnings.clone(),
-                                        true,
-                                    );
+                                    let candidate_id = format!("{:016x}-{}", seed, attempt);
+                                    *shared_runtime_report.write().await = None;
+                                    *shared_code.write().await = healed_code.clone();
+                                    *shared_candidate_id.write().await = candidate_id.clone();
 
-                                    let _ = tx
-                                        .send(BotEvent::Generated(
-                                            healed_code,
-                                            ast_analysis,
-                                            existing_code,
-                                            curated_track_names.clone(),
-                                        ))
-                                        .await;
+                                    let open_studio = !runtime_check_started;
+                                    runtime_check_started = true;
+                                    let _ = tx.send(BotEvent::RuntimeCheckRequested {
+                                        code: healed_code.clone(),
+                                        candidate_id: candidate_id.clone(),
+                                        attempt,
+                                        open_studio,
+                                    }).await;
 
-                                    return;
+                                    // The embedded REPL executes the exact candidate. A successful
+                                    // static preflight alone is not treated as a successful score.
+                                    let mut runtime_result: Option<RuntimeValidationReport> = None;
+                                    for _ in 0..(RUNTIME_VERIFY_WAIT_SECS * 10) {
+                                        if let Some(report) = shared_runtime_report.read().await.clone() {
+                                            if report.candidate_id == candidate_id {
+                                                runtime_result = Some(report);
+                                                break;
+                                            }
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                    }
+
+                                    match runtime_result {
+                                        Some(report) if report.status == "pass" => {
+                                            log_diag(
+                                                "STRudel_RUNTIME_PASS",
+                                                &format!("candidate={} detail={}", candidate_id, report.detail),
+                                            );
+                                            let ast_analysis = strudel_ast::analyze_ast_health(
+                                                &healed_code,
+                                                Vec::new(),
+                                                true,
+                                            );
+                                            let _ = tx.send(BotEvent::Generated(
+                                                healed_code,
+                                                ast_analysis,
+                                                existing_code,
+                                                curated_track_names.clone(),
+                                            )).await;
+                                            return;
+                                        }
+                                        Some(report) if report.status == "fail" => {
+                                            let runtime_error = format!(
+                                                "EMBEDDED STRUDEL RUNTIME EVALUATION FAILED: {}. Repair this exact evaluator error; preserve the composition except where the defect requires changes.",
+                                                report.detail
+                                            );
+                                            log_diag("STRudel_RUNTIME_RETRY", &runtime_error);
+                                            last_warnings.push(runtime_error.clone());
+                                            last_ast_error = Some(runtime_error);
+                                            continue;
+                                        }
+                                        Some(report) => {
+                                            // The REPL bridge itself was unavailable. Do not burn model
+                                            // attempts changing music to compensate for an infrastructure failure.
+                                            let warning = format!(
+                                                "RUNTIME UNVERIFIED: {} Static preflight passed; audition is still required.",
+                                                report.detail
+                                            );
+                                            log_diag("STRudel_RUNTIME_UNAVAILABLE", &warning);
+                                            let ast_analysis = strudel_ast::analyze_ast_health(
+                                                &healed_code,
+                                                vec![warning],
+                                                true,
+                                            );
+                                            let _ = tx.send(BotEvent::Generated(
+                                                healed_code,
+                                                ast_analysis,
+                                                existing_code,
+                                                curated_track_names.clone(),
+                                            )).await;
+                                            return;
+                                        }
+                                        None => {
+                                            let warning = format!(
+                                                "RUNTIME UNVERIFIED: No report arrived from the embedded Strudel REPL within {} seconds. Static preflight passed, but this is not proof of runtime evaluation or audible playback.",
+                                                RUNTIME_VERIFY_WAIT_SECS
+                                            );
+                                            log_diag("STRudel_RUNTIME_TIMEOUT", &warning);
+                                            let ast_analysis = strudel_ast::analyze_ast_health(
+                                                &healed_code,
+                                                vec![warning],
+                                                true,
+                                            );
+                                            let _ = tx.send(BotEvent::Generated(
+                                                healed_code,
+                                                ast_analysis,
+                                                existing_code,
+                                                curated_track_names.clone(),
+                                            )).await;
+                                            return;
+                                        }
+                                    }
                                 }
                                 Err(ast_err) => {
                                     log_diag("AST_HEAL_RETRY", &ast_err);
@@ -1050,13 +1395,17 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let shared_code = Arc::new(RwLock::new(String::from(STANDBY_BUFFER)));
+    let shared_candidate_id = Arc::new(RwLock::new(String::new()));
+    let shared_runtime_report = Arc::new(RwLock::new(None::<RuntimeValidationReport>));
     let mut app = App::new(shared_code.clone());
     let (tx, mut rx) = mpsc::channel::<BotEvent>(10);
 
     let server_code = shared_code.clone();
+    let server_candidate_id = shared_candidate_id.clone();
+    let server_runtime_report = shared_runtime_report.clone();
 
     tokio::spawn(async move {
-        start_local_studio_server(server_code).await;
+        start_local_studio_server(server_code, server_candidate_id, server_runtime_report).await;
     });
 
     let tx_discover = tx.clone();
@@ -1103,6 +1452,25 @@ async fn main() -> Result<()> {
                 BotEvent::StatusUpdate(msg) => {
                     app.status_message = msg;
                 }
+                BotEvent::RuntimeCheckRequested { code, candidate_id, attempt, open_studio } => {
+                    log_diag(
+                        "RUNTIME_CHECK_REQUESTED",
+                        &format!("candidate={} attempt={}/{}", candidate_id, attempt, MAX_GENERATION_ATTEMPTS),
+                    );
+                    app.strudel_code = code.clone();
+                    if let Ok(mut guard) = app.shared_code.try_write() {
+                        *guard = code;
+                    }
+                    app.scroll_offset = 0;
+                    app.status_message = format!(
+                        "Runtime-checking Strudel candidate {}/{} in the embedded REPL...",
+                        attempt, MAX_GENERATION_ATTEMPTS
+                    );
+                    if open_studio && !app.runtime_studio_opened {
+                        open_browser_url(&local_studio_endpoint("/studio"));
+                        app.runtime_studio_opened = true;
+                    }
+                }
                 BotEvent::Generated(code, ast_analysis, prev_code, injected_tracks) => {
                     app.strudel_code = code.clone();
 
@@ -1115,6 +1483,10 @@ async fn main() -> Result<()> {
                     app.last_injected_tracks = injected_tracks.clone();
 
                     let compiled_cleanly = ast_analysis.ast_compiled_cleanly;
+                    let runtime_unverified = ast_analysis
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.starts_with("RUNTIME UNVERIFIED:"));
 
                     let autopsy_report = app.intelligence.perform_autopsy(
                         &code,
@@ -1152,19 +1524,27 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    let studio_url = local_studio_endpoint("/studio");
-                    open_browser_url(&studio_url);
+                    if !app.runtime_studio_opened {
+                        open_browser_url(&local_studio_endpoint("/studio"));
+                        app.runtime_studio_opened = true;
+                    }
 
                     let reference_status = if injected_tracks.is_empty() {
                         "Pure Agentic (0 Golden refs)".to_string()
                     } else {
                         format!("Golden refs injected: {}", injected_tracks.join(", "))
                     };
-                    app.status_message = format!(
-                        "Composition ready (Evo #{} | {}). Studio launched: press Ctrl+Enter to play.",
-                        app.evolution_count,
-                        reference_status
-                    );
+                    app.status_message = if runtime_unverified {
+                        format!(
+                            "Preflight passed, but runtime was NOT verified (Evo #{} | {}). Check Studio status, then press Ctrl+Enter to audition.",
+                            app.evolution_count, reference_status
+                        )
+                    } else {
+                        format!(
+                            "Embedded Strudel evaluation passed (Evo #{} | {}). Press Ctrl+Enter to audition; audible output is not auto-verified.",
+                            app.evolution_count, reference_status
+                        )
+                    };
                 }
                 BotEvent::Error(err) => {
                     app.is_generating = false;
@@ -1277,11 +1657,15 @@ async fn main() -> Result<()> {
                     if !app.is_generating {
                         app.is_generating = true;
                         app.evolution_count = 0;
+                        app.runtime_studio_opened = false;
 
                         let model = app.current_model();
                         let tx_clone = tx.clone();
                         let prompt = app.prompt_input.clone();
                         let style = app.style_reference.clone();
+                        let code_state = app.shared_code.clone();
+                        let candidate_state = shared_candidate_id.clone();
+                        let validation_state = shared_runtime_report.clone();
 
                         let advisory = app.resolve_empirical_advisory_for_generation(&model);
                         let (curated_track_advisory, curated_track_names) =
@@ -1308,6 +1692,9 @@ async fn main() -> Result<()> {
                                 advisory,
                                 curated_track_advisory,
                                 curated_track_names,
+                                code_state,
+                                candidate_state,
+                                validation_state,
                                 tx_clone,
                             )
                             .await;
@@ -1323,12 +1710,16 @@ async fn main() -> Result<()> {
                             if !app.is_generating {
                                 app.is_generating = true;
                                 app.evolution_count += 1;
+                                app.runtime_studio_opened = false;
 
                                 let evo_gen = app.evolution_count;
                                 let model = app.current_model();
                                 let tx_clone = tx.clone();
                                 let prompt = app.prompt_input.clone();
                                 let style = app.style_reference.clone();
+                                let code_state = app.shared_code.clone();
+                                let candidate_state = shared_candidate_id.clone();
+                                let validation_state = shared_runtime_report.clone();
 
                                 let current = if app.strudel_code.contains("[AGENTIC READY]") {
                                     None
@@ -1372,6 +1763,9 @@ async fn main() -> Result<()> {
                                         advisory,
                                         curated_track_advisory,
                                         curated_track_names,
+                                        code_state,
+                                        candidate_state,
+                                        validation_state,
                                         tx_clone,
                                     )
                                     .await;
