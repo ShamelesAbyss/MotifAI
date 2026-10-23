@@ -3,6 +3,7 @@ mod sonic_intelligence;
 use sonic_intelligence::{ExternalAstAnalysis, OutcomeSignal, SonicIntelligence};
 
 mod orchestrator;
+mod composition_blueprints;
 #[allow(dead_code)]
 mod strudel_ast;
 
@@ -52,8 +53,9 @@ const RUNTIME_VERIFY_WAIT_SECS: u64 = 30;
 const MAX_PINNED_GOLDEN_TRACKS: usize = 2;
 const MAX_PINNED_ADVISORY_CHARS: usize = 8_000;
 
-const STANDBY_BUFFER: &str = r##"// [AGENTIC READY] Zero Presets. Zero Templates. 100% Autonomous AI Composition.
-// Enter your Musical Vision in Pane [1] and Style DNA in Pane [2], then press [Ctrl+G] or [F5].
+const STANDBY_BUFFER: &str = r##"// [AGENTIC READY] Smart Master Palette: one curated architecture seed per build/evolution.
+// Press Ctrl+P to select Smart Auto, Free-form, or one of the curated composition blueprints.
+// Enter your Musical Vision in Pane [1] and Style DNA in Pane [2], then press Ctrl+G or F5.
 setcps(0.55)
 "##;
 
@@ -102,17 +104,18 @@ fn get_strudel_system_prompt(
 ) -> String {
     let visual_repertoire = "\
 OPTIONAL VISUAL & TELEMETRY TOOLKIT:\n\
-- Visualizers are optional tools, not required decoration. Use them only when they help reveal a sound or arrangement:\n\
-  1. Optional example: attach `.color(\"#00f0ff\")._pianoroll()` or `.color(\"#39ff14\")._pianoroll()` onto melodic, arpeggio, and acid bass `note(...)` chains for cascading note-grid telemetry.\n\
-  2. Optional example: attach `.color(\"#ff8800\")._punchcard()` or `.color(\"#a6b8ff\")._punchcard()` onto rhythmic drum and percussion `s(...)` or `.struct(...)` chains for wide block-grid tracking.\n\
-  3. Optional example: attach `.color(\"#ff5500\")._scope()` or `.color(\"#00ffcc\")._scope()` onto sub-bass, lead, or master harmonic stems for real-time oscilloscope waveforms.\n\
-  4. Optional example: attach `.color(\"#b829ff\")._spiral()` or `._pitchwheel()` onto evolving polyphonic or detuned pad layers.\n\
-- Use `.color(...)` only when it supports the brief; no color or visualizer is mandatory.";
+- Visual feedback is optional and must never destabilize the audio program. Use only visualizer hooks supported by `strudel_rules.md` and the pinned embedded REPL. A visual palette is guidance, not permission to invent APIs.\n\
+- Match the display to the instrument's musical role: `._punchcard()` for rhythmic event placement; `._pianoroll()` for pitched material and voice movement; `._scope()` for waveform behavior; `._spectrum()` for frequency/timbre; `._spiral()` for cyclic structure; and `._pitchwheel()` for pitch-class relationships. Treat availability as runtime-dependent unless verified for the embedded REPL.\n\
+- `.color(\"#00f0ff\")`, `.color(\"#ff8800\")`, `.color(\"#b829ff\")`, or `.color(\"#39ff14\")` can distinguish representative roles when supported. Color is display highlighting, not an audio effect.\n\
+- Apply different visualization roles to selected representative layers, not every stem by default. For full-visual briefs, make a deliberate multi-view selection across percussion, pitched motifs, bass/texture, and frequency content while keeping code and audio coherent.\n\
+- Hydra, shader, or host-level audio-reactive graphics are extension-only. Never inject `initHydra()`, `H(...)`, or other host-specific hooks unless the user explicitly requests them and the compatible visual host is actually enabled.";
 
     let mut prompt = if let Ok(rules) = fs::read_to_string("strudel_rules.md") {
         format!(
             "You are an autonomous algorithmic composer and master of Strudel ({}). \
              You have full creative agency. Do not default to stock arrangements, fixed section counts, preset progressions, or generic loops. \
+             If one clearly delimited OPTIONAL_COMPOSITION_BLUEPRINT is supplied in the request, treat it as flexible arrangement inspiration, never as source code or rigid law. \
+             Adapt, reorder, expand, compress, combine, or abandon its stages when the user's intent or runtime constraints call for it. Do not infer unsupported Strudel APIs from a blueprint. \
              Repetition is valid when it serves a musical purpose: use ostinatos, callbacks, refrains, and evolving motifs intentionally. \
              Follow ONLY the syntax and DSP rules below and the user's prompt to invent a bespoke musical work. \
              Your sole output must be valid, executable Strudel JavaScript code, no markdown fences and no prose outside '//' comments.\n\n\
@@ -233,6 +236,11 @@ struct App {
     use_empirical_advisory: bool,
     golden_tracks_open: bool,
     golden_track_inventory: Vec<String>,
+    blueprint_picker_open: bool,
+    blueprint_inventory: Vec<composition_blueprints::BlueprintSummary>,
+    blueprint_archive_summary: String,
+    blueprint_cursor: usize,
+    blueprint_mode: String,
     golden_track_cursor: usize,
     pinned_golden_tracks: Vec<String>,
     last_injected_tracks: Vec<String>,
@@ -246,11 +254,38 @@ impl App {
 
         let intelligence = SonicIntelligence::load_or_init();
         let golden_track_inventory = intelligence.list_curated_tracks();
+        let blueprint_inventory = match composition_blueprints::list_blueprints() {
+            Ok(items) => items,
+            Err(error) => {
+                log_diag("BLUEPRINT_LIBRARY_WARNING", &error);
+                Vec::new()
+            }
+        };
+        let blueprint_archive_summary = match composition_blueprints::archive_summary() {
+            Ok(summary) => summary,
+            Err(error) => {
+                log_diag("BLUEPRINT_LIBRARY_WARNING", &error);
+                "Archive palette counts unavailable".to_string()
+            }
+        };
+        let blueprint_mode = std::env::var("MOTIFAI_COMPOSITION_BLUEPRINT")
+            .unwrap_or_else(|_| "auto".to_string());
+        let initial_blueprint_label = if blueprint_mode.eq_ignore_ascii_case("auto") || blueprint_mode.trim().is_empty() {
+            "SMART AUTO".to_string()
+        } else if blueprint_mode.eq_ignore_ascii_case("off") || blueprint_mode.eq_ignore_ascii_case("none") {
+            "FREE-FORM".to_string()
+        } else {
+            blueprint_inventory
+                .iter()
+                .find(|item| item.id.eq_ignore_ascii_case(&blueprint_mode) || item.name.eq_ignore_ascii_case(&blueprint_mode))
+                .map(|item| format!("PINNED: {}", item.name))
+                .unwrap_or_else(|| format!("PINNED: {}", blueprint_mode))
+        };
 
         log_diag(
             "INIT",
             &format!(
-                "Starting MotifAI v6.4.0 [PURE AGENTIC DEFAULT]; default_model={}; memory_path={}",
+                "Starting MotifAI v6.5.1 WIP [FREE-FORM DEFAULT]; default_model={}; memory_path={}",
                 default_model,
                 intelligence.persistence_path().display()
             ),
@@ -266,8 +301,9 @@ impl App {
             active_pane: 0,
             strudel_code: String::from(STANDBY_BUFFER),
             shared_code,
-            status_message: String::from(
-                "PURE AGENTIC MODE | Golden Tracks: OFF [Ctrl+T] | Scorebook [Ctrl+B] | Mem Advisory: OFF [Ctrl+A] | [Ctrl+G/F5] Compose",
+            status_message: format!(
+                "MASTER PALETTE: {} [Ctrl+P] | Golden Tracks OFF [Ctrl+T] | Scorebook [Ctrl+B] | MemAdv OFF [Ctrl+A] | Compose [Ctrl+G/F5]",
+                initial_blueprint_label
             ),
             is_generating: false,
             available_models: vec![default_model],
@@ -280,6 +316,11 @@ impl App {
             use_empirical_advisory: false,
             golden_tracks_open: false,
             golden_track_inventory,
+            blueprint_picker_open: false,
+            blueprint_inventory,
+            blueprint_archive_summary,
+            blueprint_cursor: 0,
+            blueprint_mode,
             golden_track_cursor: 0,
             pinned_golden_tracks: Vec::new(),
             last_injected_tracks: Vec::new(),
@@ -489,6 +530,70 @@ impl App {
             return String::new();
         }
         self.intelligence.build_experience_advisory(Some(model))
+    }
+
+    fn blueprint_mode_label(&self) -> String {
+        let mode = self.blueprint_mode.trim();
+        if mode.is_empty() || mode.eq_ignore_ascii_case("auto") {
+            "SMART AUTO".to_string()
+        } else if mode.eq_ignore_ascii_case("off") || mode.eq_ignore_ascii_case("none") {
+            "FREE-FORM (OFF)".to_string()
+        } else {
+            self.blueprint_inventory
+                .iter()
+                .find(|item| item.id.eq_ignore_ascii_case(mode) || item.name.eq_ignore_ascii_case(mode))
+                .map(|item| format!("PINNED: {}", item.name))
+                .unwrap_or_else(|| format!("PINNED: {}", mode))
+        }
+    }
+
+    fn refresh_blueprint_inventory(&mut self) {
+        match composition_blueprints::list_blueprints() {
+            Ok(items) => {
+                self.blueprint_inventory = items;
+                self.blueprint_cursor = self.blueprint_cursor.min(self.blueprint_inventory.len() + 1);
+                self.blueprint_archive_summary = match composition_blueprints::archive_summary() {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        log_diag("BLUEPRINT_LIBRARY_WARNING", &error);
+                        "Archive palette counts unavailable".to_string()
+                    }
+                };
+                self.status_message = format!(
+                    "Master Blueprint Palette refreshed: {} | Mode: {}",
+                    self.blueprint_archive_summary,
+                    self.blueprint_mode_label()
+                );
+                log_diag(
+                    "BLUEPRINT_ARCHIVE_RESCAN",
+                    &format!("Loaded {} blueprint entries", self.blueprint_inventory.len()),
+                );
+            }
+            Err(error) => {
+                log_diag("BLUEPRINT_LIBRARY_WARNING", &error);
+                self.status_message = format!("Could not load composition blueprint archive: {}", error);
+            }
+        }
+    }
+
+    fn choose_blueprint_at_cursor(&mut self) {
+        // 0 = smart auto, 1 = free-form, 2.. = concrete archive entries.
+        let selected_mode = match self.blueprint_cursor {
+            0 => "auto".to_string(),
+            1 => "off".to_string(),
+            index => match self.blueprint_inventory.get(index.saturating_sub(2)) {
+                Some(item) => item.id.clone(),
+                None => return,
+            },
+        };
+        self.blueprint_mode = selected_mode;
+        self.blueprint_picker_open = false;
+        let label = self.blueprint_mode_label();
+        log_diag("BLUEPRINT_MODE_SELECTED", &format!("{} ({})", label, self.blueprint_mode));
+        self.status_message = format!(
+            "Master Palette: {} | Applied to the next composition or evolution; one stable selection per request.",
+            label
+        );
     }
 
     fn nudge_tempo(&mut self, delta: f32) {
@@ -796,7 +901,7 @@ fn build_embedded_studio_html(code: &str, b64: &str, candidate_id: &str) -> Stri
 </head>
 <body>
 <header>
-  <div class="title">🌀 MOTIFAI v6.4.0 // SONIC INTELLIGENCE & VISUAL STUDIO</div>
+  <div class="title">🌀 MOTIFAI v6.5.1 WIP // SONIC INTELLIGENCE & VISUAL STUDIO</div>
   <div class="controls">
     <button class="theme-btn" onclick="setTheme('#00f0ff','#06080e','#0d111a')">Cyber Cyan</button>
     <button class="theme-btn" onclick="setTheme('#a6b8ff','#080b1c','#101636')">Punchcard Indigo</button>
@@ -1038,6 +1143,7 @@ async fn generate_strudel_track(
     model: String,
     user_prompt: String,
     style_ref: String,
+    blueprint_mode: String,
     existing_code: Option<String>,
     evo_gen: u32,
     empirical_advisory: String,
@@ -1058,6 +1164,61 @@ async fn generate_strudel_track(
         .unwrap_or_default();
 
     let scraped_context = scrape_reference_if_url(&style_ref, &client).await;
+
+    // Select once for the full generation request, before retries begin. Each retry
+    // builds a fresh prompt and inserts this same optional block once, preventing
+    // duplicate accumulation while keeping the composition architecture stable.
+    let blueprint_context = match composition_blueprints::select_for_request_with_override(
+        &user_prompt,
+        &style_ref,
+        Some(&blueprint_mode),
+    ) {
+        Ok(Some(selected)) => {
+            log_diag(
+                "COMPOSITION_BLUEPRINT_SELECTED",
+                &format!(
+                    "Selected '{}' ({}) once for this request; reused across fresh repair prompts.",
+                    selected.name, selected.id
+                ),
+            );
+            let _ = tx.send(BotEvent::StatusUpdate(format!(
+                "Master Palette selected '{}' [{}] once for this request; related instrument, production, and visual palettes matched automatically.",
+                selected.name, selected.id
+            ))).await;
+            selected.prompt_block
+        }
+        Ok(None) => {
+            log_diag(
+                "COMPOSITION_BLUEPRINT_NONE",
+                "No blueprint selected; composition remains free-form.",
+            );
+            let _ = tx.send(BotEvent::StatusUpdate(
+                "Master Palette: free-form mode, no architecture or palette block injected.".to_string()
+            )).await;
+            String::new()
+        }
+        Err(warning) => {
+            log_diag("COMPOSITION_BLUEPRINT_WARNING", &warning);
+            let _ = tx.send(BotEvent::StatusUpdate(format!(
+                "Master Palette unavailable; safely falling back to free-form composition: {}",
+                warning
+            ))).await;
+            String::new()
+        }
+    };
+    let has_blueprint = !blueprint_context.trim().is_empty();
+    let mode_header = match (existing_code.is_some(), has_blueprint) {
+        (false, false) => "FREE-FORM CREATION MODE (NO BLUEPRINT SELECTED).",
+        (true, false) => "FREE-FORM EVOLUTION MODE (NO BLUEPRINT SELECTED).",
+        (false, true) => "BLUEPRINT-ASSISTED CREATION MODE (ONE OPTIONAL ARCHITECTURE SEED; NOT A CODE TEMPLATE).",
+        (true, true) => "BLUEPRINT-ASSISTED EVOLUTION MODE (ONE OPTIONAL ARCHITECTURE SEED; NOT A CODE TEMPLATE).",
+    };
+    let blueprint_policy = if has_blueprint {
+        "One optional architecture blueprint appears below. Treat it as flexible musical guidance, not law: adapt, reorder, expand, compress, combine, transform, or abandon stages whenever the user's intent or runtime constraints call for it. Preserve the score's identity when evolving. Do not output planning prose; output the complete executable score."
+    } else {
+        "No composition blueprint was selected. Invent the form from the user's brief; do not assume a stock song structure."
+    };
+
     if curated_track_names.is_empty() {
         log_diag(
             "GOLDEN_TRACKS_INJECTION",
@@ -1123,32 +1284,41 @@ async fn generate_strudel_track(
 
         let full_prompt = match &existing_code {
             Some(current) => format!(
-                "PURE AGENTIC EVOLUTION MODE (ZERO TEMPLATES / ZERO PRESETS).\n\
-                 You have full autonomous creative agency to evolve, restructure, and elevate the current score based strictly on the user's direction and the official Strudel rules.\n\n\
+                "{}\n{}\n\n\
+                 You have full creative agency to evolve, restructure, and elevate the current score according to the user's direction. Preserve its identity where appropriate, but make meaningful changes when requested.\n\n\
                  {}\n\n\
                  User's Vision / Evolution Directive: {}\n\
-                 Style / Reference Context: {}{}{}\n\n\
+                 Style / Reference Context: {}\n\n\
+                 Retrieved Reference Page Context: {}\n\n\
+                 {}\n{}\n\n\
                  Current Score to Evolve:\n{}\n\n\
                  Output ONLY raw, executable Strudel JavaScript code starting with setcps():",
+                mode_header,
+                blueprint_policy,
                 orchestration_dna,
                 effective_vision,
                 effective_style,
                 scraped_context,
+                blueprint_context,
                 error_feedback,
                 current
             ),
             None => format!(
-                "PURE AGENTIC CREATION MODE (ZERO TEMPLATES / ZERO PRESETS).\n\
-                 You have full autonomous creative agency. Do not rely on stock templates or generic loops. \
-                 Design a bespoke musical architecture and arrangement tailored exclusively to the user's prompt and the official Strudel rules.\n\n\
+                "{}\n{}\n\n\
+                 You have full creative agency. Invent a bespoke musical architecture tailored to the user's request and the verified Strudel runtime. Do not default to stock templates or generic loops.\n\n\
                  {}\n\n\
-                 User's Musical Vision: {}\n\
-                 Style / Reference Context: {}{}{}\n\n\
+                 User's Musical Vision: {}\n\n\
+                 Style / Reference Context: {}\n\n\
+                 Retrieved Reference Page Context: {}\n\n\
+                 {}\n{}\n\n\
                  Output ONLY raw, executable Strudel JavaScript code starting with setcps():",
+                mode_header,
+                blueprint_policy,
                 orchestration_dna,
                 effective_vision,
                 effective_style,
                 scraped_context,
+                blueprint_context,
                 error_feedback
             ),
         };
@@ -1565,6 +1735,44 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // Master Composition & Performance Palette browser (Ctrl+P).
+                if app.blueprint_picker_open {
+                    if key.code == KeyCode::Esc
+                        || (key.modifiers.contains(KeyModifiers::CONTROL)
+                            && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')))
+                    {
+                        app.blueprint_picker_open = false;
+                        app.status_message = format!(
+                            "Master Palette closed | Current mode: {} | Ctrl+P to reopen",
+                            app.blueprint_mode_label()
+                        );
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
+                    {
+                        app.refresh_blueprint_inventory();
+                    } else {
+                        match key.code {
+                            KeyCode::Up => app.blueprint_cursor = app.blueprint_cursor.saturating_sub(1),
+                            KeyCode::Down => {
+                                app.blueprint_cursor = (app.blueprint_cursor + 1)
+                                    .min(app.blueprint_inventory.len() + 1);
+                            }
+                            KeyCode::Enter | KeyCode::Char(' ') => app.choose_blueprint_at_cursor(),
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                app.blueprint_cursor = 0;
+                                app.choose_blueprint_at_cursor();
+                            }
+                            KeyCode::Char('o') | KeyCode::Char('O') => {
+                                app.blueprint_cursor = 1;
+                                app.choose_blueprint_at_cursor();
+                            }
+                            KeyCode::Char('r') | KeyCode::Char('R') => app.refresh_blueprint_inventory(),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+
                 // Modal navigation inside the Golden Scorebook overlay
                 if app.golden_tracks_open {
                     if key.code == KeyCode::Esc
@@ -1622,6 +1830,29 @@ async fn main() -> Result<()> {
                 }
 
                 if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
+                {
+                    app.refresh_blueprint_inventory();
+                    app.blueprint_picker_open = true;
+                    let active_blueprint_mode = app.blueprint_mode.clone();
+                    app.blueprint_cursor = if active_blueprint_mode.eq_ignore_ascii_case("auto") || active_blueprint_mode.trim().is_empty() {
+                        0
+                    } else if active_blueprint_mode.eq_ignore_ascii_case("off") || active_blueprint_mode.eq_ignore_ascii_case("none") {
+                        1
+                    } else {
+                        app.blueprint_inventory.iter()
+                            .position(|item| item.id.eq_ignore_ascii_case(&active_blueprint_mode) || item.name.eq_ignore_ascii_case(&active_blueprint_mode))
+                            .map(|index| index + 2)
+                            .unwrap_or(0)
+                    };
+                    app.status_message = format!(
+                        "Master Palette open | Current mode: {} | Up/Down select, Enter apply, Esc close",
+                        app.blueprint_mode_label()
+                    );
+                    continue;
+                }
+
+                if key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'))
                 {
                     app.refresh_golden_track_inventory();
@@ -1663,6 +1894,7 @@ async fn main() -> Result<()> {
                         let tx_clone = tx.clone();
                         let prompt = app.prompt_input.clone();
                         let style = app.style_reference.clone();
+                        let blueprint_mode = app.blueprint_mode.clone();
                         let code_state = app.shared_code.clone();
                         let candidate_state = shared_candidate_id.clone();
                         let validation_state = shared_runtime_report.clone();
@@ -1678,8 +1910,8 @@ async fn main() -> Result<()> {
                             format!("Golden refs: {}", curated_track_names.join(", "))
                         };
                         app.status_message = format!(
-                            "Agent '{}' composing score... [{}]",
-                            model, reference_status
+                            "Agent '{}' composing score... [Palette: {} | {}]",
+                            model, app.blueprint_mode_label(), reference_status
                         );
 
                         tokio::spawn(async move {
@@ -1687,6 +1919,7 @@ async fn main() -> Result<()> {
                                 model,
                                 prompt,
                                 style,
+                                blueprint_mode,
                                 None,
                                 0,
                                 advisory,
@@ -1717,6 +1950,7 @@ async fn main() -> Result<()> {
                                 let tx_clone = tx.clone();
                                 let prompt = app.prompt_input.clone();
                                 let style = app.style_reference.clone();
+                                let blueprint_mode = app.blueprint_mode.clone();
                                 let code_state = app.shared_code.clone();
                                 let candidate_state = shared_candidate_id.clone();
                                 let validation_state = shared_runtime_report.clone();
@@ -1739,8 +1973,8 @@ async fn main() -> Result<()> {
                                     format!("Golden refs: {}", curated_track_names.join(", "))
                                 };
                                 app.status_message = format!(
-                                    "Agent '{}' evolving score into Gen #{}... [{}]",
-                                    model, evo_gen, reference_status
+                                    "Agent '{}' evolving score into Gen #{}... [Palette: {} | {}]",
+                                    model, evo_gen, app.blueprint_mode_label(), reference_status
                                 );
 
                                 if let Some(ref exp_id) = app.active_experiment_id {
@@ -1758,6 +1992,7 @@ async fn main() -> Result<()> {
                                         model,
                                         prompt,
                                         style,
+                                        blueprint_mode,
                                         current,
                                         evo_gen,
                                         advisory,
@@ -2019,7 +2254,7 @@ fn ui(f: &mut Frame, app: &App) {
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " 🌀 MOTIFAI v6.4.0 ",
+            " 🌀 MOTIFAI v6.5.1 WIP ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -2119,6 +2354,65 @@ fn ui(f: &mut Frame, app: &App) {
     if app.golden_tracks_open {
         render_golden_tracks_overlay(f, app);
     }
+    if app.blueprint_picker_open {
+        render_blueprint_picker_overlay(f, app);
+    }
+}
+
+fn render_blueprint_picker_overlay(f: &mut Frame, app: &App) {
+    let area = centered_rect(92, 90, f.area());
+    f.render_widget(Clear, area);
+
+    let mut body = format!(
+        "Current selection: {}\n\
+         Archive: {}\n\
+         Smart Auto picks one architecture and matching instrument, production, and visual palette candidates per request.\n\
+         Up/Down: navigate | Enter/Space: apply | A: Smart Auto | O: Free-form | R/Ctrl+R: rescan | Esc/Ctrl+P: close\n\n",
+        app.blueprint_mode_label(),
+        app.blueprint_archive_summary
+    );
+
+    let cursor_marker = |cursor: usize, index: usize| if cursor == index { "▶" } else { " " };
+    body.push_str(&format!(
+        " {}  SMART AUTO  | Select one architecture and intelligently matched instrument, production, and visual palettes\n",
+        cursor_marker(app.blueprint_cursor, 0)
+    ));
+    body.push_str(&format!(
+        " {}  FREE-FORM  | Disable blueprint/palette injection for unrestricted composition\n\n",
+        cursor_marker(app.blueprint_cursor, 1)
+    ));
+
+    if app.blueprint_inventory.is_empty() {
+        body.push_str("No blueprint entries loaded. Confirm knowledge/composition_blueprints.json exists.\n");
+    } else {
+        for (index, item) in app.blueprint_inventory.iter().enumerate() {
+            let cursor_index = index + 2;
+            let marker = cursor_marker(app.blueprint_cursor, cursor_index);
+            let tags = item.tags.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            body.push_str(&format!(
+                " {} {:02}. [{}] {}\n      id: {}\n      {}\n",
+                marker,
+                index + 1,
+                item.scale.to_uppercase(),
+                item.name,
+                item.id,
+                tags
+            ));
+        }
+    }
+
+    // Keep the selection close to the visible region as users browse large archives.
+    let scroll_row = app.blueprint_cursor.saturating_sub(8) as u16 * 3;
+    let view = Paragraph::new(body)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_row, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta))
+                .title(" MotifAI Master Composition & Performance Palette Archive | Ctrl+P "),
+        );
+    f.render_widget(view, area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

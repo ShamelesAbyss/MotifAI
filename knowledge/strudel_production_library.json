@@ -1,57 +1,1191 @@
-[
-  {
-    "id": "mini-notation-polyrhythm-layering",
-    "category": "mini-notation",
-    "relevance_tags": ["rhythm", "polyphony", "mini-notation", "layers"],
-    "musical_purpose": "Layer independent rhythms or chord voices within a single step using comma-separated notation.",
-    "compact_example": "note(\"[c3,eb3,g3] [f3,a3,c4]\")",
-    "compatibility_notes": "Standard Strudel mini-notation parser.",
-    "source_url": "https://strudel.cc/learn/mini-notation/",
-    "provenance": "Official Strudel Documentation",
-    "verification_status": "official-documented"
+{
+  "schema_version": 1,
+  "library_name": "MotifAI Strudel Production Intelligence",
+  "library_version": "2.0.1",
+  "reviewed": "2026-10-22",
+  "purpose": "Curated, source-linked Strudel technique cards. Retrieval should offer relevant mechanisms, not dictate song structure. Documentation support is separate from MotifAI runtime and playback verification.",
+  "runtime_contract": {
+    "target_runtime": "@strudel/repl@1.3.0",
+    "default_sample_map_is_not_a_guarantee_of_first-trigger-audibility": true,
+    "status_policy": [
+      "documentation-supported",
+      "syntax-reviewed",
+      "preflight-passed",
+      "runtime-verified",
+      "playback-verified",
+      "user-approved"
+    ],
+    "promotion_rule": "Do not promote a technique past documentation-supported until the corresponding runtime or playback observation has actually occurred."
   },
-  {
-    "id": "drum-programming-tr909-breaks",
-    "category": "drum-programming",
-    "relevance_tags": ["drums", "beats", "roland", "tr909", "break"],
-    "musical_purpose": "Program an authentic electronic rhythm using classic Roland sample banks with structural masking.",
-    "compact_example": "s(\"bd*4, ~ sd ~ sd, hh*16\").bank(\"RolandTR909\").shape(0.35)",
-    "compatibility_notes": "Requires sample bank access in browser or local container.",
-    "source_url": "https://strudel.cc/learn/samples/",
-    "provenance": "Official Strudel Examples",
-    "verification_status": "official-documented"
-  },
-  {
-    "id": "bass-design-acid-filter",
-    "category": "bass-design",
-    "relevance_tags": ["bass", "acid", "filter", "resonance", "sawtooth"],
-    "musical_purpose": "Design a driving electronic bassline using low-pass filters, high resonance, and saturation.",
-    "compact_example": "note(\"<[c1 c2]*4>\").s(\"sawtooth\").lpf(1200).lpq(6.0).shape(0.4)",
-    "compatibility_notes": "Standard DSP audio node processing.",
-    "source_url": "https://strudel.cc/learn/effects/",
-    "provenance": "Community Standard Practice",
-    "verification_status": "official-documented"
-  },
-  {
-    "id": "effects-space-orbit",
-    "category": "effects",
-    "relevance_tags": ["reverb", "delay", "orbit", "spatial", "mixing"],
-    "musical_purpose": "Isolate time-based effects onto distinct audio buses to prevent mix muddying.",
-    "compact_example": ".room(0.75).size(3.5).delay(0.3).orbit(2)",
-    "compatibility_notes": "Orbit routing is fully supported in Strudel audio architecture.",
-    "source_url": "https://strudel.cc/learn/effects/",
-    "provenance": "Official Strudel Documentation",
-    "verification_status": "official-documented"
-  },
-  {
-    "id": "modulation-euclidean-rhythms",
-    "category": "modulation",
-    "relevance_tags": ["euclidean", "rhythm", "patterns", "generator"],
-    "musical_purpose": "Generate mathematically distributed rhythmic accents across cycles.",
-    "compact_example": "s(\"bd(3,8)\").bank(\"RolandTR808\")",
-    "compatibility_notes": "Standard mini-notation pattern generator.",
-    "source_url": "https://strudel.cc/learn/mini-notation/#euclidean-rhythms",
-    "provenance": "Official Strudel Documentation",
-    "verification_status": "official-documented"
-  }
-]
+  "research_sources": [
+    {
+      "id": "official-mini-notation",
+      "url": "https://strudel.cc/learn/mini-notation/",
+      "role": "Official reference for mini-notation grouping, parallel events, weighted durations, rests, alternation, and Euclidean rhythms.",
+      "allowed_use": "Use documented grammar and short idiom examples as technical guidance.",
+      "excluded_use": "Do not infer that every example's sound assets exist in MotifAI beyond the documented default map.",
+      "license_status": "Official documentation reference; individual example snippets remain attributed to the documentation."
+    },
+    {
+      "id": "official-pattern-functions",
+      "url": "https://strudel.cc/functions/intro/",
+      "role": "Official reference for pattern construction and composition of pattern values.",
+      "allowed_use": "Use function patterns and their documented semantics as technical guidance.",
+      "excluded_use": "Do not invent APIs or assume all packages are loaded in the embedded REPL.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-time-modifiers",
+      "url": "https://strudel.cc/learn/time-modifiers/",
+      "role": "Official reference for fast, slow, Euclidean, early, and late timing modifiers.",
+      "allowed_use": "Use timing modifiers as documented, with musical intent.",
+      "excluded_use": "Do not confuse cycle time with seconds or bars.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-samples",
+      "url": "https://strudel.cc/learn/samples/",
+      "role": "Official reference for sample maps, default drum abbreviations, banks, sample variants, and lazy loading.",
+      "allowed_use": "Use default-map names and bank semantics with accurate dependency notes.",
+      "excluded_use": "Do not promise a particular optional bank, sample variant, or external asset without runtime verification.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-effects",
+      "url": "https://strudel.cc/learn/effects/",
+      "role": "Official reference for effects, signal flow, filters, delays, reverb, and orbit routing.",
+      "allowed_use": "Use effect names, documented parameter domains, and signal-flow behavior.",
+      "excluded_use": "Do not claim different settings stack serially in the same effect slot; do not treat orbit as an independent effect plugin.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-synths",
+      "url": "https://strudel.cc/learn/synths/",
+      "role": "Official reference for built-in synthesis sources and synth parameters.",
+      "allowed_use": "Use documented synthesizer sources and envelopes as technique guidance.",
+      "excluded_use": "Do not assume custom or third-party synth names are registered.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-pattern-effects",
+      "url": "https://strudel.cc/workshop/pattern-effects/",
+      "role": "Official reference for pattern transformations such as reverse and stereo juxtaposition.",
+      "allowed_use": "Use documented pattern transforms and their semantics.",
+      "excluded_use": "Do not assume a transform preserves musical intent in every composition; audition results.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-recipes",
+      "url": "https://strudel.cc/recipes/recipes/",
+      "role": "Official reference for practical, composable Strudel technique recipes.",
+      "allowed_use": "Adapt individual mechanisms to original material.",
+      "excluded_use": "Do not copy complete community compositions, distinctive melodies, or arrangements.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-signals",
+      "url": "https://strudel.cc/learn/signals/",
+      "role": "Official reference for signal patterns and continuous parameter control.",
+      "allowed_use": "Use signals and ranges with parameter-domain awareness.",
+      "excluded_use": "Do not assume a pattern signal is continuously sampled between note triggers.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-lfo",
+      "url": "https://strudel.cc/learn/lfo/",
+      "role": "Official reference for low-frequency oscillator control.",
+      "allowed_use": "Use documented LFO controls only where needed and supported.",
+      "excluded_use": "Do not invent argument keys or modulation semantics.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-tonal",
+      "url": "https://strudel.cc/learn/tonal/",
+      "role": "Official reference for tonal functions, scales, and pitch relationships.",
+      "allowed_use": "Use documented scale and pitch operations as compositional tools.",
+      "excluded_use": "Do not force tonality when the musical brief does not call for it.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-voicings",
+      "url": "https://strudel.cc/understand/voicings/",
+      "role": "Official reference for chord voicings and chord-related patterns.",
+      "allowed_use": "Use voicing examples to guide register and chord construction.",
+      "excluded_use": "Do not claim a fixed voicing is universally appropriate.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-random-modifiers",
+      "url": "https://strudel.cc/learn/random-modifiers/",
+      "role": "Official reference for controlled random pattern variation.",
+      "allowed_use": "Use randomness intentionally for ornament, texture, and variation.",
+      "excluded_use": "Do not make essential anchors randomly disappear unless desired.",
+      "license_status": "Official documentation reference."
+    },
+    {
+      "id": "official-cycles",
+      "url": "https://strudel.cc/understand/cycles/",
+      "role": "Official reference for the cycle clock and timing model.",
+      "allowed_use": "Use CPS and cycle semantics when estimating timing.",
+      "excluded_use": "Do not equate cycles with bars or seconds without stated assumptions.",
+      "license_status": "Official documentation reference."
+    }
+  ],
+  "techniques": [
+    {
+      "id": "mini-notation-polyrhythm-layering",
+      "category": "mini-notation",
+      "relevance_tags": [
+        "mini-notation",
+        "chords",
+        "polyphony",
+        "parallel",
+        "harmony",
+        "voices"
+      ],
+      "musical_purpose": "Play simultaneous chord tones inside a grouped event while preserving sequential movement between chord shapes.",
+      "compact_example": "note(\"[c3,eb3,g3] [f3,a3,c4]\")",
+      "compatibility_notes": "Mini-notation uses brackets for grouping and commas for simultaneous/parallel events. Inspect register and event grouping in the target REPL.",
+      "source_url": "https://strudel.cc/learn/mini-notation/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-mini-notation"
+      ],
+      "use_when": [
+        "A brief asks for stacked chord tones or synchronized voices."
+      ],
+      "creative_moves": [
+        "Change voicing and inversions across the progression.",
+        "Keep chord voices in a useful register rather than stacking every note low."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "drum-programming-default-map",
+      "category": "drum-programming",
+      "relevance_tags": [
+        "drums",
+        "kick",
+        "snare",
+        "hihat",
+        "beat",
+        "default-samples",
+        "groove"
+      ],
+      "musical_purpose": "Build a reliable rhythmic foundation from Strudel's documented default drum sample names without requiring a specific optional machine bank.",
+      "compact_example": "s(\"bd*4, ~ sd ~ sd, hh*8\")",
+      "compatibility_notes": "Uses documented default sample-map abbreviations bd, sd, and hh. Audio samples may lazy-load on first trigger; sample availability still depends on the embedded REPL map.",
+      "source_url": "https://strudel.cc/learn/samples/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-samples"
+      ],
+      "use_when": [
+        "The prompt needs a fast, conservative electronic beat foundation."
+      ],
+      "creative_moves": [
+        "Change kick spacing and snare placement to fit the style.",
+        "Vary hat density while protecting the main pulse.",
+        "Add rests and syncopation only where they improve the groove."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "drum-programming-tr909-breaks",
+      "category": "drum-programming",
+      "relevance_tags": [
+        "drums",
+        "beats",
+        "roland",
+        "tr909",
+        "break",
+        "bank"
+      ],
+      "musical_purpose": "Use a classic drum-bank timbre for a driving electronic rhythm when the target sample map contains the requested TR-909 sounds.",
+      "compact_example": "s(\"bd*4, ~ sd ~ sd, hh*16\").bank(\"RolandTR909\")",
+      "compatibility_notes": "The pattern receiver is complete and bank-specific. The active sample map must include RolandTR909 plus the bd, sd, and hh samples requested; otherwise use the default-map drum pattern instead. Bank availability and audible output are not assumed.",
+      "source_url": "https://strudel.cc/learn/samples/",
+      "provenance": "Official Strudel sample-bank documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-samples"
+      ],
+      "use_when": [
+        "A prompt asks for a recognizable vintage drum-machine color and the bank is present in the REPL sample browser."
+      ],
+      "creative_moves": [
+        "Keep a coherent kick/snare identity while changing hat density.",
+        "If the bank or sample names are absent, fall back to default-map samples rather than inventing assets."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the sample-bank mechanism as technique guidance. Invent original rhythms and arrangements.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel sample documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; runtime and playback not tested."
+    },
+    {
+      "id": "drum-machine-bank-switching",
+      "category": "drum-programming",
+      "relevance_tags": [
+        "drums",
+        "bank",
+        "tr808",
+        "tr909",
+        "timbre",
+        "samples"
+      ],
+      "musical_purpose": "Change drum-machine timbre while retaining a common rhythmic pattern.",
+      "compact_example": "s(\"bd sd, hh*8\").bank(\"<RolandTR808 RolandTR909>\")",
+      "compatibility_notes": "Bank names and suffix samples must exist in the active sample map. Official documentation demonstrates these bank names but the MotifAI runtime must still be checked for actual loaded assets.",
+      "source_url": "https://strudel.cc/learn/samples/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-samples"
+      ],
+      "use_when": [
+        "A composition needs timbral evolution without rewriting its rhythm."
+      ],
+      "creative_moves": [
+        "Change the bank over time while keeping the kick/snare identity.",
+        "Use only banks whose sounds browser entries are present."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "modulation-euclidean-rhythms",
+      "category": "rhythm-generation",
+      "relevance_tags": [
+        "euclidean",
+        "rhythm",
+        "accents",
+        "polyrhythm",
+        "percussion"
+      ],
+      "musical_purpose": "Distribute a chosen number of pulses over a fixed number of positions for a compact syncopated rhythm.",
+      "compact_example": "s(\"bd(3,8), hh*8\")",
+      "compatibility_notes": "Euclidean mini-notation uses pulse count and step count; the optional third argument rotates the pattern. Avoid confusing this syntax with a chained .euclid() method.",
+      "source_url": "https://strudel.cc/learn/mini-notation/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-mini-notation"
+      ],
+      "use_when": [
+        "A percussion line needs even pulse distribution or cross-cultural clave-like organization."
+      ],
+      "creative_moves": [
+        "Try different pulse/step ratios while keeping a stable meter anchor.",
+        "Rotate accents rather than adding unnecessary extra events."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "weighted-event-duration",
+      "category": "mini-notation",
+      "relevance_tags": [
+        "weight",
+        "duration",
+        "mini-notation",
+        "rhythmic phrasing",
+        "syncopation"
+      ],
+      "musical_purpose": "Give events unequal relative duration in a mini-notation sequence.",
+      "compact_example": "s(\"bd@2 hh sd hh\")",
+      "compatibility_notes": "The @ weight follows an event inside mini-notation. It is not a prefix for a numeric DSP parameter; never use .lpf(\"@200\").",
+      "source_url": "https://strudel.cc/learn/mini-notation/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-mini-notation"
+      ],
+      "use_when": [
+        "A rhythm needs long-short phrasing without switching to a different time system."
+      ],
+      "creative_moves": [
+        "Weight a key hit or sustain a rhythmic token.",
+        "Use sparingly so duration changes remain audible and legible."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "alternating-phrase-choices",
+      "category": "mini-notation",
+      "relevance_tags": [
+        "alternation",
+        "variation",
+        "phrases",
+        "mini-notation",
+        "melody"
+      ],
+      "musical_purpose": "Alternate note or phrase choices across cycles without forcing a conventional verse/chorus form.",
+      "compact_example": "note(\"<c4 eb4 g4 bb4>\")",
+      "compatibility_notes": "Angle-bracket alternatives are distributed over the pattern cycle. Actual perceived phrase length depends on the complete pattern and cycle clock.",
+      "source_url": "https://strudel.cc/learn/mini-notation/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-mini-notation"
+      ],
+      "use_when": [
+        "A motif needs restrained cyclic variation."
+      ],
+      "creative_moves": [
+        "Swap one note, register, or contour between repetitions.",
+        "Keep one recognizable anchor so alternation still feels related."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "density-with-time-modifiers",
+      "category": "time-modifiers",
+      "relevance_tags": [
+        "density",
+        "fast",
+        "slow",
+        "rhythm",
+        "arrangement",
+        "variation"
+      ],
+      "musical_purpose": "Change event density by applying documented temporal scaling to a pattern.",
+      "compact_example": "s(\"hh*4\").fast(\"<1 2 4>\")",
+      "compatibility_notes": "fast/slow are documented time modifiers and accept pattern-valued factors in Strudel. Verify perceived density and event placement after composition.",
+      "source_url": "https://strudel.cc/learn/time-modifiers/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-time-modifiers"
+      ],
+      "use_when": [
+        "A section should build or thin rhythmically while preserving its sound palette."
+      ],
+      "creative_moves": [
+        "Use density changes as transitions or builds.",
+        "Keep kick and bass anchors stable where the brief needs dance-floor continuity."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "bass-design-acid-filter",
+      "category": "bass-design",
+      "relevance_tags": [
+        "bass",
+        "acid",
+        "filter",
+        "resonance",
+        "sawtooth",
+        "saturation"
+      ],
+      "musical_purpose": "Shape a driving monophonic bass sound with controlled low-pass resonance and moderate waveshaping.",
+      "compact_example": "note(\"c1 ~ c1 g1\").s(\"sawtooth\").lpf(1200).lpq(6).shape(0.25)",
+      "compatibility_notes": "Uses documented low-pass filter, resonance, and waveshaping idioms. The sound name must be available in the embedded synth map. Keep resonance and waveshaping moderate to avoid piercing peaks or losing the bass fundamental.",
+      "source_url": "https://strudel.cc/learn/effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [
+        "https://strudel.cc/learn/synths/"
+      ],
+      "source_refs": [
+        "official-effects"
+      ],
+      "use_when": [
+        "A brief calls for acid-style or assertive electronic bass."
+      ],
+      "creative_moves": [
+        "Automate cutoff through valid parameter patterns or envelopes.",
+        "Vary rhythm and note choice rather than stacking unnecessary bass voices."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "event-stepped-filter-motion",
+      "category": "filter-modulation",
+      "relevance_tags": [
+        "lpf",
+        "filter",
+        "motion",
+        "cutoff",
+        "seg",
+        "signal"
+      ],
+      "musical_purpose": "Create stepped cutoff movement by sampling a signal pattern at multiple events per cycle.",
+      "compact_example": "s(\"supersaw\").seg(16).lpf(tri.range(200,5000).slow(2))",
+      "compatibility_notes": "This technique follows the official effects example: .seg(16) increases event sampling density so the signal can update more frequently. It is still not equivalent to unrestricted continuous audio-rate modulation.",
+      "source_url": "https://strudel.cc/learn/effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [
+        "https://strudel.cc/learn/signals/",
+        "https://strudel.cc/learn/lfo/"
+      ],
+      "source_refs": [
+        "official-effects"
+      ],
+      "use_when": [
+        "A synth needs an evolving filter sweep or rhythmic spectral movement."
+      ],
+      "creative_moves": [
+        "Adjust the cutoff range to preserve audible fundamentals.",
+        "Use slower signal motion for gradual opening and faster motion for rhythmic sweeps."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "filter-envelope-transient",
+      "category": "envelopes",
+      "relevance_tags": [
+        "filter-envelope",
+        "lpenv",
+        "decay",
+        "pluck",
+        "bass",
+        "transient"
+      ],
+      "musical_purpose": "Use a filter envelope to make each triggered note open and decay, adding articulation without inventing a continuously moving cutoff pattern.",
+      "compact_example": "note(\"c2 c2 c2 c2\").s(\"sawtooth\").lpf(900).lpenv(4).lpdecay(0.2)",
+      "compatibility_notes": "Uses filter-envelope controls documented by the current Strudel reference. Exact audible range depends on the synth source and parameter domain; verify values on the target runtime.",
+      "source_url": "https://strudel.cc/learn/effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [
+        "https://strudel.cc/learn/synths/"
+      ],
+      "source_refs": [
+        "official-effects"
+      ],
+      "use_when": [
+        "A bass, pluck, or stab needs a sharp spectral attack."
+      ],
+      "creative_moves": [
+        "Adjust envelope depth and decay to match note duration.",
+        "Use separate timbral roles instead of applying the same envelope to every layer."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "effects-space-orbit",
+      "category": "effects-routing",
+      "relevance_tags": [
+        "effects",
+        "orbit",
+        "delay",
+        "reverb",
+        "room",
+        "mixing",
+        "space"
+      ],
+      "musical_purpose": "Send a sound to a distinct effects orbit so its delay/reverb context can be adjusted without overwriting another pattern's shared orbit settings.",
+      "compact_example": "s(\"supersaw*2\").room(0.35).size(4).delay(0.2).delaytime(0.25).orbit(2)",
+      "compatibility_notes": "The entire fragment has a valid pattern receiver. Orbits share a delay and reverb instance per orbit; separate orbits are useful only when independently controlled settings are required. .size is documented as a room-size alias in the rulebook.",
+      "source_url": "https://strudel.cc/learn/effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-effects"
+      ],
+      "use_when": [
+        "Two or more layers need contrasting spatial depth."
+      ],
+      "creative_moves": [
+        "Give a lead a larger room while keeping kick and bass dry.",
+        "Keep delay feedback below 1 and leave headroom for summed tails."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "safe-delay-feedback",
+      "category": "effects",
+      "relevance_tags": [
+        "delay",
+        "feedback",
+        "echo",
+        "rhythmic-space",
+        "mixing"
+      ],
+      "musical_purpose": "Add a restrained delay send with a feedback value safely below the runaway boundary.",
+      "compact_example": "s(\"hh*2\").delay(0.25).delaytime(0.25).delayfeedback(0.35)",
+      "compatibility_notes": "The delay send, delay time, and feedback are distinct parameters. This uses the documented method family from the MotifAI rulebook; verify aliases against the pinned embedded version before treating it as runtime-tested.",
+      "source_url": "https://strudel.cc/learn/effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-effects"
+      ],
+      "use_when": [
+        "A pluck, hat, or phrase needs rhythmic echoes."
+      ],
+      "creative_moves": [
+        "Tune delay time to the groove rather than using arbitrary values.",
+        "Reduce send and feedback when long tails mask the next phrase."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "stereo-pan-motion",
+      "category": "mixing",
+      "relevance_tags": [
+        "pan",
+        "stereo",
+        "movement",
+        "width",
+        "mix"
+      ],
+      "musical_purpose": "Move a sound source between stereo positions using a pattern-valued pan parameter.",
+      "compact_example": "s(\"hh*4\").pan(\"<0.2 0.8>\")",
+      "compatibility_notes": "Official Strudel uses a 0-to-1 pan range with 0 left, 0.5 center, and 1 right. A mono/multichannel host adapter may alter output behavior.",
+      "source_url": "https://strudel.cc/learn/effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-effects"
+      ],
+      "use_when": [
+        "A secondary rhythmic layer should move without disturbing the core groove."
+      ],
+      "creative_moves": [
+        "Keep essential low-frequency anchors centered unless a deliberate effect is requested.",
+        "Use moderate motion to avoid distracting from the lead."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "headroom-through-role-gain",
+      "category": "mixing",
+      "relevance_tags": [
+        "gain",
+        "headroom",
+        "mix",
+        "layers",
+        "balance"
+      ],
+      "musical_purpose": "Establish relative level between separate parts instead of solving masking by adding more processing.",
+      "compact_example": "stack(s(\"bd*4\").gain(0.6), s(\"hh*8\").gain(0.18))",
+      "compatibility_notes": "stack() combines pattern values. Gain is not a loudness measurement; use conservative summed levels and audition the result.",
+      "source_url": "https://strudel.cc/functions/intro/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-pattern-functions"
+      ],
+      "use_when": [
+        "Multiple stems compete for attention or the mix feels crowded."
+      ],
+      "creative_moves": [
+        "Balance by musical role and register.",
+        "Lower background parts before increasing the master-like levels of every stem."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "pattern-stack-role-separation",
+      "category": "arrangement",
+      "relevance_tags": [
+        "stack",
+        "layers",
+        "polyphony",
+        "arrangement",
+        "stems"
+      ],
+      "musical_purpose": "Combine independent pattern layers with distinct rhythmic or tonal responsibilities.",
+      "compact_example": "stack(s(\"bd*4\"), s(\"~ sd ~ sd\"), s(\"hh*8\"))",
+      "compatibility_notes": "stack() combines patterns in parallel. This snippet is a technique fragment, not a complete arrangement, and uses common documented default drum sample names.",
+      "source_url": "https://strudel.cc/functions/intro/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-pattern-functions"
+      ],
+      "use_when": [
+        "A track needs independent kick, backbeat, and subdivision parts."
+      ],
+      "creative_moves": [
+        "Give layers complementary event densities.",
+        "Avoid making every stem repeat the same rhythm in a different voice."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "melodic-material-through-scale",
+      "category": "tonality",
+      "relevance_tags": [
+        "melody",
+        "scale",
+        "harmony",
+        "notes",
+        "motif"
+      ],
+      "musical_purpose": "Express a melody in scale degrees so the phrase can be adapted to a chosen scale context.",
+      "compact_example": "n(\"0 2 4 6 4 2\").scale(\"C:minor\").s(\"triangle\")",
+      "compatibility_notes": "The scale method and the C:minor syntax are documented. The selected synth source still needs to exist in the active sound map.",
+      "source_url": "https://strudel.cc/learn/tonal/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-tonal"
+      ],
+      "use_when": [
+        "A melodic idea should remain related when the tonic/mode changes."
+      ],
+      "creative_moves": [
+        "Transform contour and rhythm before adding more notes.",
+        "Preserve a small set of anchor tones to make variation perceptible."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "parallel-voiced-chord-progression",
+      "category": "harmony",
+      "relevance_tags": [
+        "chords",
+        "voicing",
+        "harmony",
+        "progression",
+        "register"
+      ],
+      "musical_purpose": "Move through explicit chord-tone groups while maintaining the timing of the progression.",
+      "compact_example": "note(\"[c3,eb3,g3] [ab2,c3,eb3] [bb2,d3,f3] [g2,bb2,d3]\").s(\"triangle\")",
+      "compatibility_notes": "Chord tones are simultaneous comma-separated events within each grouped mini-notation unit. This is an illustrative progression fragment, not a theory claim that the harmony fits every brief.",
+      "source_url": "https://strudel.cc/understand/voicings/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [
+        "https://strudel.cc/learn/mini-notation/"
+      ],
+      "source_refs": [
+        "official-voicings"
+      ],
+      "use_when": [
+        "A tonal composition needs clear chordal anchors or pads."
+      ],
+      "creative_moves": [
+        "Adjust voicing and bass register for smooth movement.",
+        "Let a lead motif use tones or tensions that relate to the current chord."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "reversed-cycle-development",
+      "category": "pattern-transformations",
+      "relevance_tags": [
+        "reverse",
+        "rev",
+        "motif",
+        "variation",
+        "transition"
+      ],
+      "musical_purpose": "Reframe existing material by reversing its event order rather than introducing unrelated notes.",
+      "compact_example": "note(\"c4 eb4 g4 bb4\").rev().s(\"triangle\")",
+      "compatibility_notes": "rev() is a documented pattern transformation. Resulting accent and contour need musical audition; reverse is not automatically a good variation.",
+      "source_url": "https://strudel.cc/workshop/pattern-effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-pattern-effects"
+      ],
+      "use_when": [
+        "A callback or transition needs recognizable but transformed material."
+      ],
+      "creative_moves": [
+        "Use reversal on a phrase or supporting layer before applying it to the main motif.",
+        "Alternate original and transformed forms to make the relationship audible."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "stereo-jux-transformation",
+      "category": "pattern-transformations",
+      "relevance_tags": [
+        "jux",
+        "stereo",
+        "rev",
+        "width",
+        "pattern-effects"
+      ],
+      "musical_purpose": "Keep a pattern on one side while transforming the other side, creating stereo contrast from shared material.",
+      "compact_example": "n(\"0 2 4 6\").scale(\"C:minor\").s(\"supersaw\").jux(rev)",
+      "compatibility_notes": "jux(rev) is documented in Strudel pattern-function examples. Verify stereo output in the host; it does not replace separate musical layers where those are needed.",
+      "source_url": "https://strudel.cc/workshop/pattern-effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-pattern-effects"
+      ],
+      "use_when": [
+        "A sustained or arpeggiated part needs width without writing two unrelated melodies."
+      ],
+      "creative_moves": [
+        "Keep the transformed side slightly lower in gain.",
+        "Avoid overusing stereo tricks on kick and sub-bass layers."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "delayed-transformed-counterline",
+      "category": "pattern-transformations",
+      "relevance_tags": [
+        "off",
+        "counterline",
+        "echo",
+        "transpose",
+        "layering",
+        "motif"
+      ],
+      "musical_purpose": "Create a delayed transformed copy of a phrase for a counterline or intervallic answer.",
+      "compact_example": "note(\"c4 eb4 g4\").off(1/8, x => x.transpose(7)).s(\"triangle\")",
+      "compatibility_notes": "off(time, transform) is documented; time is measured in cycle units, not milliseconds. Keep note density and interval choice intentional.",
+      "source_url": "https://strudel.cc/functions/intro/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-pattern-functions"
+      ],
+      "use_when": [
+        "A lead phrase needs an echoing or related response."
+      ],
+      "creative_moves": [
+        "Use a small delay and a coherent interval.",
+        "Lower the response so it complements rather than masks the main line."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "late-entry-and-anticipation",
+      "category": "time-modifiers",
+      "relevance_tags": [
+        "late",
+        "early",
+        "timing",
+        "groove",
+        "anticipation"
+      ],
+      "musical_purpose": "Shift a supporting pattern in cycle time to create anticipation, laid-back timing, or a phased feel.",
+      "compact_example": "s(\"hh*8\").late(1/16)",
+      "compatibility_notes": "early/late offsets are documented time modifiers. The offset is in cycles; listen for unintended timing instability.",
+      "source_url": "https://strudel.cc/learn/time-modifiers/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-time-modifiers"
+      ],
+      "use_when": [
+        "A repetitive part needs subtle placement variation."
+      ],
+      "creative_moves": [
+        "Use small offsets relative to the base cycle.",
+        "Avoid shifting all rhythmic anchors simultaneously unless creating a deliberate rhythmic rupture."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "controlled-event-degradation",
+      "category": "random-variation",
+      "relevance_tags": [
+        "degradeBy",
+        "probability",
+        "randomness",
+        "hi-hat",
+        "ornament"
+      ],
+      "musical_purpose": "Thin out nonessential events to create controlled variation while leaving other layers and important anchors intact.",
+      "compact_example": "s(\"hh*16\").degradeBy(0.2)",
+      "compatibility_notes": "degradeBy(p) probabilistically removes events according to documented Strudel behavior. Use it on an ornamental part rather than the only source of pulse unless instability is intended.",
+      "source_url": "https://strudel.cc/learn/random-modifiers/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-random-modifiers"
+      ],
+      "use_when": [
+        "A repetitive high-frequency or percussive layer needs organic gaps."
+      ],
+      "creative_moves": [
+        "Keep kick and primary motif stable while varying hats or ornaments.",
+        "Use modest removal rates before increasing randomness."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "sample-variant-rotation",
+      "category": "samples",
+      "relevance_tags": [
+        "sample-variants",
+        "n",
+        "drums",
+        "variation",
+        "sound-map"
+      ],
+      "musical_purpose": "Select among indexed variants of a sample over time so repeated events can vary timbrally.",
+      "compact_example": "s(\"hh*8\").bank(\"RolandTR909\").n(\"0 1 2 3\")",
+      "compatibility_notes": "The selected bank must contain hh samples; indexes are zero-based and may wrap when larger than the available variant count. Check the REPL sounds browser.",
+      "source_url": "https://strudel.cc/learn/samples/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-samples"
+      ],
+      "use_when": [
+        "A repeating hat or percussion line sounds unnaturally identical."
+      ],
+      "creative_moves": [
+        "Rotate available variants while preserving timing.",
+        "Don't assume every bank has the same number of variants."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "timbral-role-with-independent-layer-chains",
+      "category": "layering",
+      "relevance_tags": [
+        "layer",
+        "sound-design",
+        "synthesis",
+        "motif",
+        "timbre"
+      ],
+      "musical_purpose": "Build timbral depth from independent pattern chains so each voice can have its own synthesis source, filtering, and gain.",
+      "compact_example": "stack(note(\"c3 eb3 g3\").s(\"triangle\").lpf(900).gain(0.35), note(\"c3 eb3 g3\").s(\"sawtooth\").lpf(3200).gain(0.12))",
+      "compatibility_notes": "Uses documented stack() to combine pattern values and ordinary synth/effect chains. Both sound sources must be available in the embedded REPL; the example is not runtime-tested.",
+      "source_url": "https://strudel.cc/functions/intro/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [
+        "https://strudel.cc/learn/synths/",
+        "https://strudel.cc/learn/effects/"
+      ],
+      "source_refs": [
+        "official-pattern-functions",
+        "official-synths",
+        "official-effects"
+      ],
+      "use_when": [
+        "One musical idea needs a low body and quiet upper edge."
+      ],
+      "creative_moves": [
+        "Use separate gain/filter values for each branch.",
+        "If layer() fails in the embedded build, use separate named patterns combined by stack()."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "sample-slicing-resequence",
+      "category": "sample-manipulation",
+      "relevance_tags": [
+        "samples",
+        "chop",
+        "slice",
+        "breakbeat",
+        "resequence"
+      ],
+      "musical_purpose": "Turn a suitable loaded sample into smaller pieces or a reordered sequence for breakbeat and glitch development.",
+      "compact_example": "s(\"bd sd hh cp\").chop(8)",
+      "compatibility_notes": "chop() is documented, but the musical result depends on sample duration and source content. This example is intentionally conservative and may be more useful after replacing the source with an available transient-rich sample.",
+      "source_url": "https://strudel.cc/recipes/recipes/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-recipes"
+      ],
+      "use_when": [
+        "The source material has clear transients that benefit from granular resequencing."
+      ],
+      "creative_moves": [
+        "Keep a recognizable pulse underneath aggressive chopping.",
+        "Use only source names confirmed in the REPL; recipe names like amen or breaks165 are not guaranteed defaults."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "polymetric-layer-contrast",
+      "category": "rhythmic-architecture",
+      "relevance_tags": [
+        "polymeter",
+        "polyrhythm",
+        "pattern-length",
+        "cross-rhythm",
+        "layers"
+      ],
+      "musical_purpose": "Place contrasting repeating lengths or subdivisions against a shared cycle framework when the cross-rhythm is intentional.",
+      "compact_example": "s(\"{bd sd cp, hh*4}\")",
+      "compatibility_notes": "Curly-brace polymetric mini-notation is documented in MotifAI's rulebook. It changes relationships between repeating groups; verify the active parser accepts the selected expression.",
+      "source_url": "https://strudel.cc/learn/mini-notation/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-mini-notation"
+      ],
+      "use_when": [
+        "An experimental or progressive arrangement needs interlocking pulse lengths."
+      ],
+      "creative_moves": [
+        "Start with a clear shared pulse, then introduce one contrasting rate.",
+        "Keep the groove intelligible when the brief calls for dance-floor stability."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "continuous-signal-sampled-by-events",
+      "category": "signal-modulation",
+      "relevance_tags": [
+        "tri",
+        "range",
+        "seg",
+        "signals",
+        "filter",
+        "lfo"
+      ],
+      "musical_purpose": "Use a signal pattern to vary a parameter across more note events per cycle, reducing the blocky appearance of slowly sampled control changes.",
+      "compact_example": "s(\"supersaw\").seg(16).lpf(tri.range(100,5000).slow(2))",
+      "compatibility_notes": "This mirrors the official effects documentation. Signal parameters may be sampled on events; this is not guaranteed continuous audio-rate modulation. Parameter units and available built-in signals must match the target runtime.",
+      "source_url": "https://strudel.cc/learn/effects/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [
+        "https://strudel.cc/learn/signals/",
+        "https://strudel.cc/learn/lfo/"
+      ],
+      "source_refs": [
+        "official-effects"
+      ],
+      "use_when": [
+        "A filter movement sounds static because the signal is sampled too infrequently."
+      ],
+      "creative_moves": [
+        "Increase event density only when it improves the desired modulation.",
+        "Use an audio-rate LFO where continuous movement is specifically required."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "articulation-through-envelope",
+      "category": "envelopes",
+      "relevance_tags": [
+        "attack",
+        "release",
+        "articulation",
+        "plucks",
+        "pads",
+        "dynamics"
+      ],
+      "musical_purpose": "Shape the attack and tail of synthesized notes so register and envelope support the phrase's role.",
+      "compact_example": "note(\"c4 eb4 g4\").s(\"triangle\").attack(0.01).release(0.15)",
+      "compatibility_notes": "Envelope controls are documented for synthesis contexts. The exact audible effect depends on source type, note duration, and pinned runtime.",
+      "source_url": "https://strudel.cc/learn/synths/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-synths"
+      ],
+      "use_when": [
+        "A sound needs to be plucky, sustained, soft-edged, or sharply articulated."
+      ],
+      "creative_moves": [
+        "Use short attacks for clear transients and longer attacks for gradual entries.",
+        "Keep release short enough to avoid smearing a dense phrase."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "pattern-variation-through-time",
+      "category": "time-modifiers",
+      "relevance_tags": [
+        "slow",
+        "fast",
+        "development",
+        "variation",
+        "timing"
+      ],
+      "musical_purpose": "Spread a motif across more cycles or compress it to create a new pacing without changing its pitches.",
+      "compact_example": "note(\"c4 eb4 g4 bb4\").slow(2).s(\"triangle\")",
+      "compatibility_notes": "slow() is documented and changes temporal scale, not necessarily the perceived tempo of the complete composition. Check how the phrase aligns with other layers.",
+      "source_url": "https://strudel.cc/learn/time-modifiers/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-time-modifiers"
+      ],
+      "use_when": [
+        "A motif should feel suspended, spacious, or stretched before it returns to its original pace."
+      ],
+      "creative_moves": [
+        "Contrast the stretched motif with an unchanged pulse layer.",
+        "Bring back the original version to make the transformation audible."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    },
+    {
+      "id": "explicit-independent-phrase-sections",
+      "category": "arrangement-foundation",
+      "relevance_tags": [
+        "cat",
+        "sequence",
+        "section",
+        "arrangement",
+        "extended-composition"
+      ],
+      "musical_purpose": "Sequence distinct pattern sections deliberately while preserving an overall clock and using separate stems only where their relationships matter.",
+      "compact_example": "cat(s(\"bd*4, hh*8\"), s(\"bd*4, ~ sd ~ sd, hh*8\"))",
+      "compatibility_notes": "cat() is a documented pattern-construction function, but nested pattern sequencing semantics should be confirmed in the pinned runtime. It is an illustrative technique fragment, not a duration-guaranteed arrangement helper.",
+      "source_url": "https://strudel.cc/functions/intro/",
+      "provenance": "Official Strudel documentation reference; compact technique idiom curated for MotifAI.",
+      "verification_status": "documentation-supported",
+      "additional_source_urls": [],
+      "source_refs": [
+        "official-pattern-functions"
+      ],
+      "use_when": [
+        "A short work needs a change of section without relying on undocumented arrange() semantics."
+      ],
+      "creative_moves": [
+        "Use distinct rhythmic functions between stages.",
+        "Check section duration against CPS and the exact helper semantics instead of guessing bar counts."
+      ],
+      "license_status": "Documentation-supported idiom; not represented as a runtime-tested complete composition.",
+      "reuse_policy": "Use the mechanism as technique guidance. Invent original notes, rhythms, timbral choices, and arrangements. Do not reconstruct or copy a complete song or distinctive community arrangement.",
+      "verified_environment": "Not yet runtime-verified by MotifAI; target embedded REPL is pinned to @strudel/repl 1.3.0.",
+      "verification_date": "2026-10-22",
+      "verification_method": "Reviewed against linked official Strudel documentation and MotifAI strudel_rules.md v2.2.2 on 2026-10-22; embedded runtime evaluation and audio audition were not performed."
+    }
+  ]
+}
