@@ -1585,7 +1585,7 @@ async fn generate_strudel_track(
     let client = reqwest::Client::builder()
         .no_proxy()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(600))
+        .timeout(Duration::from_secs(1800))
         .build()
         .unwrap_or_default();
 
