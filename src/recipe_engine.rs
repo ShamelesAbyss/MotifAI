@@ -1,24 +1,22 @@
 //! MotifAI Structured Prompt Recipe & Context Budgeting Engine.
 //!
 //! Inspired by `deepseek-recipe` (`Conversation` AST normalization, deferred
-//! context loading, and `ConversationRequest::resolve_max_tokens`), this module:
+//! context loading, and `ConversationRequest::resolve_max_tokens`), this module
+//! integrates bidirectionally with `orchestrator.rs` and `strudel_ast.rs`:
 //! 1. Slices `strudel_rules.md` into an Always-On Core Contract plus on-demand
-//!    domain slices (`P1.3`), using AST capability inspection from `strudel_ast`
-//!    and enforcing model-tier character budgets so 20B–32B models do not suffer
-//!    from 23,500-token prefill stalls.
+//!    domain slices (`P1.3`), combining AST capability inspection (`strudel_ast`),
+//!    orchestrator intent helpers, and `orchestrator::inspect_existing_score`
+//!    defect telemetry while enforcing model-tier character budgets.
 //! 2. Enforces a KV-Cache-Locked prefix layout: the `system` prompt and the top
 //!    of the `user` prompt remain byte-for-byte identical across retry attempts,
 //!    moving mutable items (`production_reference`, `error_feedback`, delta
 //!    error-triggered rule slices, and the per-attempt `seed`) to the trailing suffix.
-//! 3. Embeds a non-negotiable Audible Playback & Slider Execution Contract so
-//!    models never pass string names to `slider(...)`, never hallucinate silent
-//!    `.s("pad")` / `.s("pluck")` synths, and use `arrange(...)` instead of
-//!    1-cycle `cat(...)` over section stacks.
-//! 4. Switches retry passes (`attempt > 1` with a failed candidate) into a
-//!    Compact Repair Replay mode so the model fixes the broken code without
-//!    re-evaluating 14,000 characters of blueprint/web-scrape boilerplate.
+//! 3. Switches retry passes (`attempt > 1` with a failed candidate) into a
+//!    Compact Repair Replay mode driven by `orchestrator::build_compact_repair_directive`,
+//!    replacing ~6,500 characters of creation lecture and 14,000 characters of
+//!    blueprint boilerplate with a surgical repair directive.
 
-use crate::strudel_ast;
+use crate::{orchestrator, strudel_ast};
 use std::{
     collections::HashSet,
     fs,
@@ -136,8 +134,22 @@ pub fn is_heavy_offload_model(model: &str) -> bool {
         .any(|tag| lower_model.contains(tag))
 }
 
+/// Helper used by `orchestrator.rs` so the orchestration directive can embed
+/// the active recipe slice manifest directly into its header.
+pub fn active_domain_labels_for_context(
+    user_prompt: &str,
+    style_ref: &str,
+    existing_code: Option<&str>,
+) -> Vec<&'static str> {
+    let domains = detect_active_domains(user_prompt, style_ref, existing_code, None);
+    let mut labels: Vec<&'static str> = domains.into_iter().map(RuleDomain::label).collect();
+    labels.sort_unstable();
+    labels
+}
+
 /// Compiles a `RecipeSpec` into a KV-cache-aligned `(system_prompt, user_prompt)`
-/// pair with on-demand rule slicing, AST-driven domain activation, and resolved token budgets.
+/// pair with on-demand rule slicing, AST + Orchestrator domain activation, and
+/// resolved token budgets.
 pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
     let pass_mode = if spec.attempt > 1 && spec.last_failed_candidate.is_some() {
         RecipePassMode::CompactRepair
@@ -249,10 +261,6 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
                         spec.scraped_context.trim()
                     ));
                 }
-                // When evolving an existing score on a 20B–32B CPU-offloaded model, the
-                // current score already supplies the concrete arrangement architecture.
-                // Omitting the 14K blueprint block during heavy-model evolution cuts
-                // prefill latency by ~60 seconds.
                 if !spec.blueprint_context.trim().is_empty() && !is_heavy {
                     prompt.push('\n');
                     prompt.push_str(spec.blueprint_context.trim());
@@ -298,12 +306,23 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
             prompt
         }
         RecipePassMode::CompactRepair => {
+            // Use `orchestrator::build_compact_repair_directive` so repair passes
+            // receive exact harmonic context, stem role inventory, and score hazard
+            // diagnostics without re-evaluating 6,500 chars of creation lecture.
+            let compact_directive = orchestrator::build_compact_repair_directive(
+                spec.user_prompt,
+                spec.style_ref,
+                spec.existing_code,
+                spec.last_failed_candidate,
+                spec.last_ast_error,
+            );
+
             let mut prompt = String::with_capacity(4096);
             prompt.push_str("COMPACT TECHNICAL REPAIR MODE (SURGICAL CANDIDATE FIX).\n");
             prompt.push_str(
                 "Repair the earliest confirmed syntax, stem-wiring, slider, synth-name, or runtime defect in the previous candidate score below. Preserve all working musical stems, motifs, and arrangement structure.\n\n",
             );
-            prompt.push_str(&stable_orchestration);
+            prompt.push_str(&compact_directive);
             prompt.push_str(&format!(
                 "\n\nOriginal Musical Brief: {}\nStyle Context: {}\n",
                 effective_vision, effective_style
@@ -465,8 +484,7 @@ OPTIONAL VISUAL & TELEMETRY TOOLKIT:\n\
 }
 
 /// Determines which rulebook domains are needed for the current request, combining
-/// prompt keyword analysis with `strudel_ast::summarize_ast_capabilities` when
-/// existing or candidate code is present.
+/// `orchestrator` intent & score inspection with `strudel_ast::summarize_ast_capabilities`.
 pub fn detect_active_domains(
     user_prompt: &str,
     style_ref: &str,
@@ -478,16 +496,22 @@ pub fn detect_active_domains(
 
     if let Some(code) = existing_code {
         let caps = strudel_ast::summarize_ast_capabilities(code);
-        if caps.has_sliders {
+        let inspection = orchestrator::inspect_existing_score(code);
+
+        if caps.has_sliders || !inspection.slider_names.is_empty() || inspection.has_slider_defects()
+        {
             domains.insert(RuleDomain::LiveSliders);
         }
         if caps.has_visualizers {
             domains.insert(RuleDomain::VisualTelemetry);
         }
-        if caps.has_multi_section_arrange {
+        if caps.has_multi_section_arrange
+            || inspection.uses_arrange
+            || inspection.single_cycle_section_cat
+        {
             domains.insert(RuleDomain::MultiSectionArrange);
         }
-        if caps.has_synthesis_or_filters {
+        if caps.has_synthesis_or_filters || !inspection.hallucinated_synth_roles.is_empty() {
             domains.insert(RuleDomain::AdvancedSynthesis);
         }
         if caps.has_rhythm_or_sampling {
@@ -503,65 +527,52 @@ pub fn detect_active_domains(
         user_prompt,
         style_ref,
         last_error.unwrap_or_default()
-    )
-    .to_ascii_lowercase();
+    );
+    let lower = combined.to_ascii_lowercase();
 
-    if [
-        "slider",
-        "sliders",
-        "live control",
-        "macro control",
-        "knob",
-        "knobs",
-        ".range(",
-    ]
-    .iter()
-    .any(|kw| combined.contains(kw))
-    {
+    if orchestrator::explicitly_requests_controls(&combined) || lower.contains(".range(") {
         domains.insert(RuleDomain::LiveSliders);
     }
 
-    if [
-        "visual",
-        "pianoroll",
-        "punchcard",
-        "scope",
-        "tscope",
-        "spectrum",
-        "spectrogram",
-        "spiral",
-        "pitchwheel",
-        ".color(",
-        "hydra",
-        "shader",
-    ]
-    .iter()
-    .any(|kw| combined.contains(kw))
+    if orchestrator::explicitly_requests_visuals(&combined)
+        || lower.contains("tscope")
+        || lower.contains("spectrogram")
+        || lower.contains(".color(")
     {
         domains.insert(RuleDomain::VisualTelemetry);
     }
 
-    if [
-        "arrange",
-        "movement",
-        "concert",
-        "live set",
-        "dj set",
-        "suite",
-        "intro",
-        "bridge",
-        "outro",
-        "drop",
-        "section",
-        "slowcat",
-        "stepcat",
-        "seq(",
-        "cat(",
-    ]
-    .iter()
-    .any(|kw| combined.contains(kw))
+    if orchestrator::is_extended_composition_request(&combined)
+        || [
+            "arrange", "movement", "intro", "bridge", "outro", "drop", "section", "slowcat",
+            "stepcat", "seq(", "cat(",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw))
     {
         domains.insert(RuleDomain::MultiSectionArrange);
+    }
+
+    if orchestrator::prompt_mentions_harmony(&combined)
+        || [
+            "dorian",
+            "phrygian",
+            "lydian",
+            "minor",
+            "major",
+            "microtonal",
+            "xenharmonic",
+            "bohlen",
+            "edo",
+            "transpose",
+            "arp",
+            "voicing",
+            "melodic",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw))
+    {
+        domains.insert(RuleDomain::MicrotonalAndHarmony);
     }
 
     if [
@@ -597,7 +608,7 @@ pub fn detect_active_domains(
         "adsr",
     ]
     .iter()
-    .any(|kw| combined.contains(kw))
+    .any(|kw| lower.contains(kw))
     {
         domains.insert(RuleDomain::AdvancedSynthesis);
     }
@@ -631,34 +642,9 @@ pub fn detect_active_domains(
         "kick",
     ]
     .iter()
-    .any(|kw| combined.contains(kw))
+    .any(|kw| lower.contains(kw))
     {
         domains.insert(RuleDomain::RhythmAndSampling);
-    }
-
-    if [
-        "scale",
-        "chord",
-        "voicing",
-        "harmony",
-        "harmonic",
-        "melodic",
-        "dorian",
-        "phrygian",
-        "lydian",
-        "minor",
-        "major",
-        "microtonal",
-        "xenharmonic",
-        "bohlen",
-        "edo",
-        "transpose",
-        "arp",
-    ]
-    .iter()
-    .any(|kw| combined.contains(kw))
-    {
-        domains.insert(RuleDomain::MicrotonalAndHarmony);
     }
 
     if user_prompt.trim().is_empty()
@@ -687,7 +673,6 @@ fn load_and_slice_rules(
     let mut out = String::new();
     let mut included_labels = HashSet::new();
 
-    // Pass 1: Always include CoreContract sections first within the budget.
     for section in &sections {
         if section.domain == RuleDomain::CoreContract {
             let trimmed = section.content.trim();
@@ -701,7 +686,6 @@ fn load_and_slice_rules(
         }
     }
 
-    // Pass 2: Include requested non-core domain sections within the remaining budget.
     for section in &sections {
         if section.domain != RuleDomain::CoreContract && active_domains.contains(&section.domain) {
             let trimmed = section.content.trim();
@@ -878,8 +862,8 @@ pub fn estimate_tokens(text: &str) -> usize {
 }
 
 /// Modeled after `deepseek-recipe`'s `ConversationRequest::resolve_max_tokens`:
-/// computes a stable context window (`num_ctx`) for the request and a task-aware
-/// output token cap (`num_predict`), honoring `MOTIFAI_NUM_CTX` and `MOTIFAI_NUM_PREDICT`.
+/// uses `orchestrator::classify_work_mode` and `orchestrator::is_extended_composition_request`
+/// to compute a stable context window (`num_ctx`) and task-aware output token cap (`num_predict`).
 pub fn resolve_token_budget(
     model: &str,
     user_prompt: &str,
@@ -889,40 +873,9 @@ pub fn resolve_token_budget(
     pass_mode: RecipePassMode,
     estimated_input_tokens: usize,
 ) -> (u32, i32, &'static str) {
-    let combined = format!("{}\n{}", user_prompt, style_ref).to_ascii_lowercase();
-    let is_extended = [
-        "concert",
-        "live set",
-        "dj set",
-        "full set",
-        "festival set",
-        "album side",
-        "long-form",
-        "long form",
-        "extended",
-        "multi-movement",
-        "multi movement",
-        "suite",
-        "96-bar",
-        "96 bar",
-        "128-bar",
-    ]
-    .iter()
-    .any(|kw| combined.contains(kw));
-
-    let is_targeted_edit = existing_code.is_some()
-        && [
-            "change only",
-            "only change",
-            "keep everything else",
-            "keep the rest",
-            "without changing",
-            "just make",
-            "tweak",
-        ]
-        .iter()
-        .any(|kw| combined.contains(kw));
-
+    let combined = format!("{}\n{}", user_prompt, style_ref);
+    let is_extended = orchestrator::is_extended_composition_request(&combined);
+    let work_mode = orchestrator::classify_work_mode(user_prompt, existing_code, 0);
     let is_heavy_model = is_heavy_offload_model(model);
 
     let (default_ctx, base_predict, profile_name) = if is_heavy_model {
@@ -942,14 +895,13 @@ pub fn resolve_token_budget(
             let candidate_tokens = failed_candidate.map(estimate_tokens).unwrap_or(1024);
             ((candidate_tokens + 1024) as i32).clamp(2_048, base_predict)
         }
-        RecipePassMode::FullComposition => {
-            if is_targeted_edit {
+        RecipePassMode::FullComposition => match work_mode {
+            orchestrator::WorkMode::TargetedEdit | orchestrator::WorkMode::Repair => {
                 let current_tokens = existing_code.map(estimate_tokens).unwrap_or(1024);
                 ((current_tokens + 1024) as i32).clamp(2_048, base_predict)
-            } else {
-                base_predict
             }
-        }
+            orchestrator::WorkMode::Create | orchestrator::WorkMode::Evolution => base_predict,
+        },
     };
 
     let required_total = (estimated_input_tokens as u32)
@@ -979,11 +931,11 @@ mod tests {
 
     #[test]
     fn stabilize_orchestration_header_strips_mutable_seed_from_line_one() {
-        let raw = "MOTIFAI COMPOSITION ORCHESTRATOR | WORK MODE: NEW COMPOSITION | EVOLUTION GENERATION: 0 | CREATIVE SEED: 987654321\n\nTASK CONTRACT\nInvent music.";
+        let raw = "MOTIFAI COMPOSITION ORCHESTRATOR | WORK MODE: NEW COMPOSITION | EVOLUTION GENERATION: 0 | ACTIVE RECIPE SLICES: [core] | CREATIVE SEED: 987654321\n\nTASK CONTRACT\nInvent music.";
         let (stabilized, seed) = stabilize_orchestration_header(raw);
         assert_eq!(seed, Some(987654321));
         assert!(stabilized.starts_with(
-            "MOTIFAI COMPOSITION ORCHESTRATOR | WORK MODE: NEW COMPOSITION | EVOLUTION GENERATION: 0\n"
+            "MOTIFAI COMPOSITION ORCHESTRATOR | WORK MODE: NEW COMPOSITION | EVOLUTION GENERATION: 0 | ACTIVE RECIPE SLICES: [core]\n"
         ));
         assert!(!stabilized.lines().next().unwrap().contains("CREATIVE SEED"));
     }
@@ -1081,7 +1033,7 @@ Use ._pianoroll() and ._punchcard().
     }
 
     #[test]
-    fn compact_repair_mode_omits_blueprint_and_scraped_bloat() {
+    fn compact_repair_mode_omits_blueprint_and_scraped_bloat_and_uses_compact_orchestrator() {
         let dna = "MOTIFAI COMPOSITION ORCHESTRATOR | WORK MODE: NEW COMPOSITION | EVOLUTION GENERATION: 0 | CREATIVE SEED: 555\nBody";
         let spec = RecipeSpec {
             model: "qwen2.5-coder:14b",
@@ -1099,7 +1051,7 @@ Use ._pianoroll() and ._punchcard().
             production_reference: "",
             existing_code: None,
             last_ast_error: Some("missing root"),
-            last_failed_candidate: Some("setcps(0.5)\nconst a = s(\"bd\")"),
+            last_failed_candidate: Some("setcps(0.5)\nconst a = note(\"c2\").s(\"pad\")"),
             error_feedback: "\nMANDATORY REPAIR FEEDBACK: fix root\n",
         };
 
@@ -1109,6 +1061,12 @@ Use ._pianoroll() and ._punchcard().
         assert!(!compiled
             .user_prompt
             .contains("<OPTIONAL_COMPOSITION_BLUEPRINT>"));
+        assert!(compiled
+            .user_prompt
+            .contains("MOTIFAI COMPACT REPAIR ORCHESTRATOR"));
+        assert!(compiled
+            .user_prompt
+            .contains("unverified synth role name(s) [pad]"));
         assert!(compiled
             .user_prompt
             .contains("MANDATORY REPAIR FEEDBACK: fix root"));
