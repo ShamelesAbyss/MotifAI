@@ -40,7 +40,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-const APP_VERSION: &str = "6.9.0";
+const APP_VERSION: &str = "6.10.0";
 const LOOPBACK_IP: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 7777;
 const OLLAMA_PORT: u16 = 11434;

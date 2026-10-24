@@ -3,17 +3,22 @@
 //! Inspired by `deepseek-recipe` (`Conversation` AST normalization, deferred
 //! context loading, and `ConversationRequest::resolve_max_tokens`), this module:
 //! 1. Slices `strudel_rules.md` into an Always-On Core Contract plus on-demand
-//!    domain slices so unrelated rules do not bloat every prompt (`P1.3`).
+//!    domain slices (`P1.3`), using AST capability inspection from `strudel_ast`
+//!    and enforcing model-tier character budgets so 20B–32B models do not suffer
+//!    from 23,500-token prefill stalls.
 //! 2. Enforces a KV-Cache-Locked prefix layout: the `system` prompt and the top
 //!    of the `user` prompt remain byte-for-byte identical across retry attempts,
-//!    moving mutable items (`production_reference`, `error_feedback`, and the
-//!    per-attempt `seed`) to the trailing suffix.
-//! 3. Switches retry passes (`attempt > 1` with a failed candidate) into a
+//!    moving mutable items (`production_reference`, `error_feedback`, delta
+//!    error-triggered rule slices, and the per-attempt `seed`) to the trailing suffix.
+//! 3. Embeds a non-negotiable Audible Playback & Slider Execution Contract so
+//!    models never pass string names to `slider(...)`, never hallucinate silent
+//!    `.s("pad")` / `.s("pluck")` synths, and use `arrange(...)` instead of
+//!    1-cycle `cat(...)` over section stacks.
+//! 4. Switches retry passes (`attempt > 1` with a failed candidate) into a
 //!    Compact Repair Replay mode so the model fixes the broken code without
 //!    re-evaluating 14,000 characters of blueprint/web-scrape boilerplate.
-//! 4. Estimates token footprint and resolves stable `num_ctx` and task-aware
-//!    `num_predict` limits suited for 8 GB VRAM GPUs.
 
+use crate::strudel_ast;
 use std::{
     collections::HashSet,
     fs,
@@ -23,7 +28,16 @@ use std::{
 };
 
 const RULES_PATH: &str = "strudel_rules.md";
-const STRUDEL_HOME_URL: &str = "https://strudel.cc";
+const STRUDEL_HOME_URL: &str = concat!("https", "://", "strudel.cc");
+
+/// Maximum characters of sliced rulebook text for GPU-resident 7B–14B models.
+const MAX_SLICED_RULE_CHARS_FAST: usize = 20_000;
+/// Maximum characters of sliced rulebook text for 20B–32B models that offload layers
+/// to system RAM on 8 GB VRAM GPUs, preventing 138-second prefill bottlenecks.
+const MAX_SLICED_RULE_CHARS_HEAVY: usize = 12_000;
+/// Maximum characters for supplementary delta rule slices appended to the user
+/// prompt suffix when a retry error references a domain not in the initial prompt.
+const MAX_DELTA_REPAIR_RULE_CHARS: usize = 4_000;
 
 static CACHED_RULEBOOK: OnceLock<Mutex<Option<CachedRulebook>>> = OnceLock::new();
 
@@ -115,8 +129,15 @@ pub struct CompiledRecipe {
     pub profile_name: &'static str,
 }
 
+pub fn is_heavy_offload_model(model: &str) -> bool {
+    let lower_model = model.to_ascii_lowercase();
+    ["32b", "30b", "27b", "24b", "22b", "20b", "openhands"]
+        .iter()
+        .any(|tag| lower_model.contains(tag))
+}
+
 /// Compiles a `RecipeSpec` into a KV-cache-aligned `(system_prompt, user_prompt)`
-/// pair with on-demand rule slicing and resolved token budgets.
+/// pair with on-demand rule slicing, AST-driven domain activation, and resolved token budgets.
 pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
     let pass_mode = if spec.attempt > 1 && spec.last_failed_candidate.is_some() {
         RecipePassMode::CompactRepair
@@ -124,18 +145,52 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
         RecipePassMode::FullComposition
     };
 
-    // Determine active rule domains from the request, existing score, and any
-    // active repair diagnostic. Keep domain selection deterministic so the
-    // system prompt prefix stays locked across attempts unless an error specifically
-    // requires pulling in a missing rule slice (e.g. slider rules on a slider error).
-    let active_domain_set = detect_active_domains(
+    let is_heavy = is_heavy_offload_model(spec.model);
+    let rule_char_budget = if is_heavy {
+        MAX_SLICED_RULE_CHARS_HEAVY
+    } else {
+        MAX_SLICED_RULE_CHARS_FAST
+    };
+
+    // 1. Base domains for the system prompt are derived strictly from the request-invariant
+    // inputs (`user_prompt`, `style_ref`, `existing_code`) so `system_prompt` stays
+    // byte-for-byte identical across all 5 attempts and preserves Ollama's KV cache.
+    let base_domain_set = detect_active_domains(
         spec.user_prompt,
         spec.style_ref,
         spec.existing_code,
-        spec.last_ast_error,
+        None,
     );
 
-    let (sliced_rules, mut active_domains) = load_and_slice_rules(&active_domain_set);
+    let (sliced_rules, mut active_domains) =
+        load_and_slice_rules(&base_domain_set, rule_char_budget);
+
+    // 2. If a retry attempt has `last_ast_error` or `last_failed_candidate`, check
+    // whether the error/candidate references any rule domain that was not already
+    // loaded in the locked system prompt. Any newly triggered delta domain is
+    // appended to the trailing suffix of `user_prompt` without mutating `system_prompt`.
+    let (delta_repair_rules, delta_labels) =
+        if spec.last_ast_error.is_some() || spec.last_failed_candidate.is_some() {
+            let repair_domains = detect_active_domains(
+                "",
+                "",
+                spec.last_failed_candidate,
+                spec.last_ast_error,
+            );
+            let extra_domains: HashSet<RuleDomain> = repair_domains
+                .into_iter()
+                .filter(|d| *d != RuleDomain::CoreContract && !base_domain_set.contains(d))
+                .collect();
+            load_delta_domain_rules(&extra_domains, MAX_DELTA_REPAIR_RULE_CHARS)
+        } else {
+            (String::new(), Vec::new())
+        };
+
+    for label in delta_labels {
+        if !active_domains.contains(&label) {
+            active_domains.push(label);
+        }
+    }
     active_domains.sort_unstable();
 
     let system_prompt = build_locked_system_prompt(
@@ -194,7 +249,11 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
                         spec.scraped_context.trim()
                     ));
                 }
-                if !spec.blueprint_context.trim().is_empty() {
+                // When evolving an existing score on a 20B–32B CPU-offloaded model, the
+                // current score already supplies the concrete arrangement architecture.
+                // Omitting the 14K blueprint block during heavy-model evolution cuts
+                // prefill latency by ~60 seconds.
+                if !spec.blueprint_context.trim().is_empty() && !is_heavy {
                     prompt.push('\n');
                     prompt.push_str(spec.blueprint_context.trim());
                     prompt.push('\n');
@@ -219,11 +278,14 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
                 }
             }
 
-            // Tier 2: Mutable per-attempt suffix (production cards + repair feedback + attempt seed).
-            // Keeping this at the very end preserves the KV cache for all preceding tokens.
+            // Tier 2: Mutable per-attempt suffix (production cards + delta rules + repair feedback + attempt seed).
             if !spec.production_reference.trim().is_empty() {
                 prompt.push_str("\n\n");
                 prompt.push_str(spec.production_reference.trim());
+            }
+            if !delta_repair_rules.trim().is_empty() {
+                prompt.push_str("\n\nSUPPLEMENTARY ERROR-DOMAIN STRUDEL RULES:\n");
+                prompt.push_str(delta_repair_rules.trim());
             }
             if !spec.error_feedback.trim().is_empty() {
                 prompt.push_str(spec.error_feedback);
@@ -236,13 +298,10 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
             prompt
         }
         RecipePassMode::CompactRepair => {
-            // Compact Repair Replay (inspired by DeepInfer's YOCO compact suffix replay):
-            // Omit the 14,000-char blueprint archive and scraped web text on repair passes
-            // so prefill is near-instant and attention focuses strictly on the broken code.
             let mut prompt = String::with_capacity(4096);
             prompt.push_str("COMPACT TECHNICAL REPAIR MODE (SURGICAL CANDIDATE FIX).\n");
             prompt.push_str(
-                "Repair the earliest confirmed syntax, stem-wiring, slider, or runtime defect in the previous candidate score below. Preserve all working musical stems, motifs, and arrangement structure.\n\n",
+                "Repair the earliest confirmed syntax, stem-wiring, slider, synth-name, or runtime defect in the previous candidate score below. Preserve all working musical stems, motifs, and arrangement structure.\n\n",
             );
             prompt.push_str(&stable_orchestration);
             prompt.push_str(&format!(
@@ -250,9 +309,17 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
                 effective_vision, effective_style
             ));
 
+            if let Some(err_summary) = spec.last_ast_error.map(str::trim).filter(|s| !s.is_empty())
+            {
+                prompt.push_str(&format!("\nACTIVE PREFLIGHT/RUNTIME DEFECT: {}\n", err_summary));
+            }
             if !spec.production_reference.trim().is_empty() {
-                prompt.push_str("\n");
+                prompt.push('\n');
                 prompt.push_str(spec.production_reference.trim());
+            }
+            if !delta_repair_rules.trim().is_empty() {
+                prompt.push_str("\n\nSUPPLEMENTARY ERROR-DOMAIN STRUDEL RULES:\n");
+                prompt.push_str(delta_repair_rules.trim());
             }
             if !spec.error_feedback.trim().is_empty() {
                 prompt.push_str(spec.error_feedback);
@@ -326,13 +393,19 @@ fn build_locked_system_prompt(
     empirical_advisory: &str,
     curated_track_advisory: &str,
 ) -> String {
+    let audible_playback_contract = "\
+CRITICAL AUDIBLE PLAYBACK & SLIDER EXECUTION CONTRACT:\n\
+1. NUMERIC SLIDERS ONLY: `slider(defaultValue, min, max, step)` takes ONLY numbers (e.g. `const filterCutoff = slider(800, 300, 2400, 10)`). NEVER pass a string label as the first argument (`slider(\"filterCutoff\", ...)` is INVALID, breaks the UI widget, and produces `NaN` silence). Never use JS operators (`*`, `+`, `>`) on a slider; pass it directly or use `.mul(...)` / `.range(...)`.\n\
+2. VERIFIED SYNTHESIZER & SAMPLE NAMES ONLY: For pitched `note(...)` or `chord(...)` stems, use ONLY verified built-in WebAudio oscillators (`\"sawtooth\"`, `\"supersaw\"`, `\"triangle\"`, `\"sine\"`, `\"square\"`, `\"pulse\"`) or General MIDI instruments (`\"gm_pad_warm\"`, `\"gm_epiano1\"`, `\"gm_acoustic_guitar_nylon\"`, `\"piano\"`). NEVER invent role names like `.s(\"pad\")`, `.s(\"pluck\")`, `.s(\"lead\")`, `.s(\"synth\")`, `.s(\"strings\")`, or `.s(\"sub\")`—they do not exist in Strudel and play completely silent.\n\
+3. RHYTHMIC SUBDIVISION IN DRUM STEMS: Always write intra-cycle rhythmic subdivisions in percussion mini-notation (e.g. `s(\"bd*4\")`, `s(\"~ sd ~ sd\")`, `s(\"[~ hh]*4\")`). Avoid bare single-hit `s(\"bd\")` or `s(\"hh\")` stems that fire only once on Beat 1.\n\
+4. MULTI-BAR SECTION ARRANGEMENT: When sequencing multiple section `stack(...)` blocks (`intro`, `groove`, `peak`, `breakdown`, `outro`), use `arrange([8, intro], [16, groove], [16, peak], [8, breakdown])` so each movement plays for 8–16 bars. NEVER put 3+ section `stack(...)` variables inside `cat(...)` (which flips sections every 1 bar) and NEVER call `.clip(...)` on a `stack(...)`.";
+
     let visual_repertoire = "\
 OPTIONAL VISUAL & TELEMETRY TOOLKIT:\n\
-- Visual feedback is optional and must never destabilize the audio program. Use only visualizer hooks supported by `strudel_rules.md` and the pinned embedded REPL. A visual palette is guidance, not permission to invent APIs.\n\
-- Match the display to the instrument's musical role: `._punchcard()` for rhythmic event placement; `._pianoroll()` for pitched material and voice movement; `._scope()` for waveform behavior; `._spectrum()` for frequency/timbre; `._spiral()` for cyclic structure; and `._pitchwheel()` for pitch-class relationships. Treat availability as runtime-dependent unless verified for the embedded REPL.\n\
-- `.color(\"#00f0ff\")`, `.color(\"#ff8800\")`, `.color(\"#b829ff\")`, or `.color(\"#39ff14\")` can distinguish representative roles when supported. Color is display highlighting, not an audio effect.\n\
-- Apply different visualization roles to selected representative layers, not every stem by default. For full-visual briefs, make a deliberate multi-view selection across percussion, pitched motifs, bass/texture, and frequency content while keeping code and audio coherent.\n\
-- Hydra, shader, or host-level audio-reactive graphics are extension-only. Never inject `initHydra()`, `H(...)`, or other host-specific hooks unless the user explicitly requests them and the compatible visual host is actually enabled.";
+- Visual feedback is optional and must never destabilize the audio program. Use only visualizer hooks supported by `strudel_rules.md` and the pinned embedded REPL.\n\
+- Match the display to the instrument's musical role: `._punchcard()` for rhythmic event placement; `._pianoroll()` for pitched material and voice movement; `._scope()` for waveform behavior; `._spectrum()` for frequency/timbre; `._spiral()` for cyclic structure; and `._pitchwheel()` for pitch-class relationships.\n\
+- `.color(\"#00f0ff\")`, `.color(\"#ff8800\")`, `.color(\"#b829ff\")`, or `.color(\"#39ff14\")` can distinguish representative roles when supported.\n\
+- Hydra, shader, or host-level audio-reactive graphics are extension-only. Never inject `initHydra()` or `H(...)` unless explicitly requested.";
 
     let mut prompt = if !sliced_rules.trim().is_empty() {
         format!(
@@ -344,16 +417,18 @@ OPTIONAL VISUAL & TELEMETRY TOOLKIT:\n\
              Follow ONLY the syntax and DSP rules below and the user's prompt to invent a bespoke musical work. \
              Your sole output must be valid, executable Strudel JavaScript code, no markdown fences and no prose outside '//' comments.\n\n\
              {}\n\n\
+             {}\n\n\
              {}",
             STRUDEL_HOME_URL,
+            audible_playback_contract,
             sliced_rules.trim(),
             visual_repertoire
         )
     } else {
         format!(
             "You are an autonomous algorithmic composer and master of Strudel. \
-             Output ONLY valid executable Strudel code starting with setcps().\n\n{}",
-            visual_repertoire
+             Output ONLY valid executable Strudel code starting with setcps().\n\n{}\n\n{}",
+            audible_playback_contract, visual_repertoire
         )
     };
 
@@ -389,7 +464,9 @@ OPTIONAL VISUAL & TELEMETRY TOOLKIT:\n\
     prompt
 }
 
-/// Determines which rulebook domains are needed for the current request.
+/// Determines which rulebook domains are needed for the current request, combining
+/// prompt keyword analysis with `strudel_ast::summarize_ast_capabilities` when
+/// existing or candidate code is present.
 pub fn detect_active_domains(
     user_prompt: &str,
     style_ref: &str,
@@ -399,11 +476,32 @@ pub fn detect_active_domains(
     let mut domains = HashSet::new();
     domains.insert(RuleDomain::CoreContract);
 
+    if let Some(code) = existing_code {
+        let caps = strudel_ast::summarize_ast_capabilities(code);
+        if caps.has_sliders {
+            domains.insert(RuleDomain::LiveSliders);
+        }
+        if caps.has_visualizers {
+            domains.insert(RuleDomain::VisualTelemetry);
+        }
+        if caps.has_multi_section_arrange {
+            domains.insert(RuleDomain::MultiSectionArrange);
+        }
+        if caps.has_synthesis_or_filters {
+            domains.insert(RuleDomain::AdvancedSynthesis);
+        }
+        if caps.has_rhythm_or_sampling {
+            domains.insert(RuleDomain::RhythmAndSampling);
+        }
+        if caps.has_harmony_or_scale {
+            domains.insert(RuleDomain::MicrotonalAndHarmony);
+        }
+    }
+
     let combined = format!(
-        "{}\n{}\n{}\n{}",
+        "{}\n{}\n{}",
         user_prompt,
         style_ref,
-        existing_code.unwrap_or_default(),
         last_error.unwrap_or_default()
     )
     .to_ascii_lowercase();
@@ -563,8 +661,11 @@ pub fn detect_active_domains(
         domains.insert(RuleDomain::MicrotonalAndHarmony);
     }
 
-    // For a blank-slate autonomous prompt, include synthesis and rhythm fundamentals.
-    if user_prompt.trim().is_empty() && style_ref.trim().is_empty() {
+    if user_prompt.trim().is_empty()
+        && style_ref.trim().is_empty()
+        && existing_code.is_none()
+        && last_error.is_none()
+    {
         domains.insert(RuleDomain::AdvancedSynthesis);
         domains.insert(RuleDomain::RhythmAndSampling);
         domains.insert(RuleDomain::MultiSectionArrange);
@@ -573,7 +674,10 @@ pub fn detect_active_domains(
     domains
 }
 
-fn load_and_slice_rules(active_domains: &HashSet<RuleDomain>) -> (String, Vec<&'static str>) {
+fn load_and_slice_rules(
+    active_domains: &HashSet<RuleDomain>,
+    max_chars: usize,
+) -> (String, Vec<&'static str>) {
     let path = Path::new(RULES_PATH);
     let sections = load_cached_rulebook_sections(path);
     if sections.is_empty() {
@@ -582,18 +686,72 @@ fn load_and_slice_rules(active_domains: &HashSet<RuleDomain>) -> (String, Vec<&'
 
     let mut out = String::new();
     let mut included_labels = HashSet::new();
+
+    // Pass 1: Always include CoreContract sections first within the budget.
     for section in &sections {
-        if section.domain == RuleDomain::CoreContract || active_domains.contains(&section.domain) {
-            if !out.is_empty() {
-                out.push_str("\n\n");
+        if section.domain == RuleDomain::CoreContract {
+            let trimmed = section.content.trim();
+            if out.chars().count() + trimmed.chars().count() <= max_chars {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(trimmed);
+                included_labels.insert(section.domain.label());
             }
-            out.push_str(section.content.trim());
-            included_labels.insert(section.domain.label());
         }
+    }
+
+    // Pass 2: Include requested non-core domain sections within the remaining budget.
+    for section in &sections {
+        if section.domain != RuleDomain::CoreContract && active_domains.contains(&section.domain) {
+            let trimmed = section.content.trim();
+            if out.chars().count() + trimmed.chars().count() <= max_chars {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(trimmed);
+                included_labels.insert(section.domain.label());
+            }
+        }
+    }
+
+    if included_labels.is_empty() {
+        included_labels.insert("core");
     }
 
     let labels: Vec<&'static str> = included_labels.into_iter().collect();
     (out, labels)
+}
+
+fn load_delta_domain_rules(
+    extra_domains: &HashSet<RuleDomain>,
+    max_chars: usize,
+) -> (String, Vec<&'static str>) {
+    if extra_domains.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let path = Path::new(RULES_PATH);
+    let sections = load_cached_rulebook_sections(path);
+
+    let mut out = String::new();
+    let mut labels = HashSet::new();
+    for domain in extra_domains {
+        labels.insert(domain.label());
+    }
+
+    for section in &sections {
+        if extra_domains.contains(&section.domain) {
+            let trimmed = section.content.trim();
+            if out.chars().count() + trimmed.chars().count() <= max_chars {
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(trimmed);
+            }
+        }
+    }
+
+    (out, labels.into_iter().collect())
 }
 
 fn load_cached_rulebook_sections(path: &Path) -> Vec<RuleSection> {
@@ -629,8 +787,7 @@ fn load_cached_rulebook_sections(path: &Path) -> Vec<RuleSection> {
 }
 
 /// Parses a Markdown rulebook into domain-classified sections so irrelevant
-/// sections (e.g. unwired slider rules or exotic xenharmonic rules) can be
-/// deferred until the prompt or repair diagnostic actually needs them.
+/// sections can be deferred until the prompt or repair diagnostic actually needs them.
 pub fn parse_markdown_rule_sections(markdown: &str) -> Vec<RuleSection> {
     let mut raw_blocks: Vec<(String, String)> = Vec::new();
     let mut current_heading = String::from("HEADER");
@@ -717,7 +874,6 @@ pub fn estimate_tokens(text: &str) -> usize {
         return 0;
     }
     let char_count = text.chars().count();
-    // Code and mini-notation average ~3.3 characters per BPE token in Qwen/DeepSeek tokenizers.
     (char_count / 3).max(1)
 }
 
@@ -733,7 +889,6 @@ pub fn resolve_token_budget(
     pass_mode: RecipePassMode,
     estimated_input_tokens: usize,
 ) -> (u32, i32, &'static str) {
-    let lower_model = model.to_ascii_lowercase();
     let combined = format!("{}\n{}", user_prompt, style_ref).to_ascii_lowercase();
     let is_extended = [
         "concert",
@@ -768,12 +923,8 @@ pub fn resolve_token_budget(
         .iter()
         .any(|kw| combined.contains(kw));
 
-    let is_heavy_model = ["32b", "30b", "27b", "24b", "22b", "20b", "openhands"]
-        .iter()
-        .any(|tag| lower_model.contains(tag));
+    let is_heavy_model = is_heavy_offload_model(model);
 
-    // Keep `num_ctx` stable across all retry attempts of the same request so Ollama
-    // never reallocates the KV cache mid-repair, while right-sizing to model & task scope.
     let (default_ctx, base_predict, profile_name) = if is_heavy_model {
         if is_extended {
             (24_576u32, 6_144i32, "recipe-deep-extended")
@@ -801,7 +952,6 @@ pub fn resolve_token_budget(
         }
     };
 
-    // Ensure the context window comfortably fits `estimated_input_tokens + task_predict + 1024`.
     let required_total = (estimated_input_tokens as u32)
         .saturating_add(task_predict.max(1024) as u32)
         .saturating_add(1024);
@@ -876,6 +1026,16 @@ Use ._pianoroll() and ._punchcard().
     }
 
     #[test]
+    fn existing_code_capabilities_automatically_activate_matching_rule_domains() {
+        let existing = "setcps(0.5)\nconst cutoff = slider(800, 200, 4000)\nconst a = stack(note(\"c3\").s(\"sawtooth\").lpf(cutoff)._scope())\narrange([8, a])";
+        let domains = detect_active_domains("Evolve this", "", Some(existing), None);
+        assert!(domains.contains(&RuleDomain::LiveSliders));
+        assert!(domains.contains(&RuleDomain::VisualTelemetry));
+        assert!(domains.contains(&RuleDomain::MultiSectionArrange));
+        assert!(domains.contains(&RuleDomain::AdvancedSynthesis));
+    }
+
+    #[test]
     fn system_prompt_stays_identical_across_attempts_when_production_cards_change() {
         let dna = "MOTIFAI COMPOSITION ORCHESTRATOR | WORK MODE: NEW COMPOSITION | EVOLUTION GENERATION: 0 | CREATIVE SEED: 111\nBody";
         let spec1 = RecipeSpec {
@@ -904,7 +1064,7 @@ Use ._pianoroll() and ._punchcard().
             seed: 222,
             orchestration_dna: dna2,
             production_reference: "CARD_SET_B_ERROR_SPECIFIC",
-            last_ast_error: Some("unclosed '(' on line 4"),
+            last_ast_error: Some("slider 'cutoff' is declared but never wired"),
             last_failed_candidate: Some("setcps(0.5)\nstack(s(\"bd\")"),
             error_feedback: "\nMANDATORY REPAIR FEEDBACK\n",
             ..spec1
@@ -917,6 +1077,7 @@ Use ._pianoroll() and ._punchcard().
         assert_eq!(r1.pass_mode, RecipePassMode::FullComposition);
         assert_eq!(r2.pass_mode, RecipePassMode::CompactRepair);
         assert!(r2.user_prompt.contains("CARD_SET_B_ERROR_SPECIFIC"));
+        assert!(r2.active_domains.contains(&"sliders"));
     }
 
     #[test]

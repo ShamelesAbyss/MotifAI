@@ -3,9 +3,9 @@
 //! This module is deliberately not a co-composer. It does not rewrite pitches,
 //! impose a scale, replace DSP methods, clamp parameters, merge roots, or auto-mix.
 //! It extracts candidate code, inserts MotifAI's default tempo only when no
-//! top-level tempo call is present, applies one narrow repair for a malformed
-//! standalone `@number` filter-cutoff string, and rejects a small set of clearly
-//! identified source defects. It does NOT parse JavaScript into a full AST or execute Strudel.
+//! top-level tempo call is present, applies narrow deterministic heals for
+//! standalone `@number` filter-cutoff strings and string-labeled `slider("name", ...)`
+//! calls, and rejects clearly identified source and silent-playback defects.
 //!
 //! `validate_strudel_ast` is retained as a compatibility name. Its result means
 //! lexical/structural preflight passed, not runtime evaluation or audible playback.
@@ -15,24 +15,72 @@ use std::collections::HashSet;
 
 const DEFAULT_CPS: &str = "setcps(0.55)";
 
+/// Lightweight structural capability summary used by `recipe_engine` to activate
+/// the exact rule slices needed when evolving or repairing a candidate score.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AstCapabilitySummary {
+    pub has_sliders: bool,
+    pub has_visualizers: bool,
+    pub has_multi_section_arrange: bool,
+    pub has_synthesis_or_filters: bool,
+    pub has_rhythm_or_sampling: bool,
+    pub has_harmony_or_scale: bool,
+}
+
+/// Inspects an existing or failed Strudel candidate so `recipe_engine` can
+/// deterministically activate the matching rule domains.
+pub fn summarize_ast_capabilities(code: &str) -> AstCapabilitySummary {
+    let masked = mask_comments_and_strings(code).unwrap_or_else(|_| code.to_string());
+    let has_sliders = contains_identifier_call(&masked, "slider");
+    let has_visualizers = !extract_visualizer_names(&masked).is_empty()
+        || contains_identifier_call(&masked, "color");
+    let has_multi_section_arrange = contains_any_call(
+        &masked,
+        &["arrange", "cat", "slowcat", "fastcat", "seq", "stepcat"],
+    );
+    let has_synthesis_or_filters = contains_any_call(
+        &masked,
+        &[
+            "lpf", "hpf", "bpf", "lpq", "lpenv", "fm", "fmi", "fmh", "room", "delay", "shape",
+            "distort", "crush", "coarse", "phaser", "vowel", "attack", "release", "adsr", "pan",
+            "jux", "orbit",
+        ],
+    );
+    let has_rhythm_or_sampling = contains_any_call(
+        &masked,
+        &[
+            "s", "sound", "bank", "chop", "striate", "slice", "splice", "loopAt", "every",
+            "sometimes", "often", "rarely", "degrade", "degradeBy", "euclid", "polymeter",
+        ],
+    );
+    let has_harmony_or_scale =
+        contains_any_call(&masked, &["note", "chord", "scale", "voicing", "arp", "transpose"]);
+
+    AstCapabilitySummary {
+        has_sliders,
+        has_visualizers,
+        has_multi_section_arrange,
+        has_synthesis_or_filters,
+        has_rhythm_or_sampling,
+        has_harmony_or_scale,
+    }
+}
+
 /// Extracts a likely Strudel program, applies safe host-level normalization, and
 /// performs conservative source preflight. Musical expressions are not broadly
-/// rewritten. A standalone `@number` filter-cutoff string such as `.lpf("@200")`
-/// is normalized to the numeric cutoff `.lpf(200)`. Unknown APIs are preserved.
+/// rewritten:
+/// 1. A standalone `@number` filter-cutoff string such as `.lpf("@200")` is
+///    normalized to the numeric cutoff `.lpf(200)`.
+/// 2. A string-labeled slider call such as `slider("cutoff", 800, 300, 1500)`
+///    is normalized to Strudel's numeric signature `slider(800, 300, 1500)`.
 pub fn compile_and_heal_strudel(raw: &str) -> Result<String, String> {
     let extracted = strip_thinking_and_extract_code(raw);
     if extracted.trim().is_empty() {
         return Err("Model returned no recognizable Strudel code.".to_string());
     }
 
-    // Keep generated source intact apart from one narrowly understood failure:
-    // a standalone `@number` inside a filter-cutoff string (for example
-    // `.lpf("@200")`) is not valid mini-notation. Since the parameter name
-    // identifies the numeric domain and the literal contains exactly one number,
-    // the conservative fallback is the equivalent fixed cutoff `.lpf(200)`.
-    // We do not rewrite weighted events such as `note("c4@2 e4")` or genuine
-    // cutoff patterns such as `.lpf("<200 400 800>")`.
     let mut code = heal_standalone_weighted_filter_values(extracted.trim());
+    code = heal_string_labeled_sliders(&code);
 
     let tempo_count = count_top_level_tempo_calls(&code)?;
     if tempo_count == 0 {
@@ -86,9 +134,6 @@ pub fn analyze_ast_health(
         }
     }
 
-    // Slider type/signature details are intentionally runtime-dependent. Emit
-    // conservative diagnostics instead of assuming the helper returns a number
-    // or a Pattern and rewriting the generated expression.
     for name in &slider_names {
         let occurrences = identifier_occurrences(&masked, name);
         if occurrences <= 1 {
@@ -113,8 +158,6 @@ pub fn analyze_ast_health(
     warnings = unique_preserving_order(&warnings);
 
     ExternalAstAnalysis {
-        // Compatibility field: this reflects lexical preflight success only.
-        // It does not assert a real JavaScript AST parse or browser compilation.
         ast_compiled_cleanly: success,
         warnings,
         parsed_sections: unique_preserving_order(&parsed_sections),
@@ -136,8 +179,10 @@ pub fn validate_strudel_ast(code: &str) -> Result<(), String> {
     validate_delimiters(&masked)?;
     validate_mini_notation_delimiters(code)?;
     reject_standalone_weighted_filter_values(code)?;
+    reject_invalid_slider_arguments(code)?;
     reject_unquoted_numeric_notation_candidates(&masked)?;
     reject_javascript_slider_arithmetic(&masked)?;
+    reject_hallucinated_synth_role_names(code)?;
     reject_invented_root_wrapper(&masked)?;
 
     if !contains_trigger_call(&masked) {
@@ -155,6 +200,7 @@ pub fn validate_strudel_ast(code: &str) -> Result<(), String> {
     }
 
     reject_unused_sliders_and_pattern_stems(&masked)?;
+    reject_single_cycle_section_cat(&masked)?;
 
     Ok(())
 }
@@ -203,11 +249,7 @@ fn contains_identifier_call(source: &str, name: &str) -> bool {
 }
 
 /// Repairs only a standalone `@number` passed as a quoted value to a filter
-/// cutoff method, e.g. `.lpf("@200")` -> `.lpf(200)`. In mini-notation, `@` is
-/// a temporal weight operator attached to an event; it is not a prefix for a
-/// numeric parameter. This targeted fallback keeps the score playable without
-/// inventing a dynamic curve. For movement, the generator should emit a real
-/// value pattern such as `.lpf("<200 400 800>")` instead.
+/// cutoff method, e.g. `.lpf("@200")` -> `.lpf(200)`.
 fn heal_standalone_weighted_filter_values(source: &str) -> String {
     let mut output = String::with_capacity(source.len());
     let mut i = 0usize;
@@ -292,6 +334,467 @@ fn heal_standalone_weighted_filter_values(source: &str) -> String {
     }
 
     output
+}
+
+/// Repairs `slider("label", default, min, max, step)` into `slider(default, min, max, step)`
+/// when the first argument is a string label followed by a numeric default value.
+/// In Strudel, `slider(value, min, max, step)` only accepts numeric arguments; a
+/// leading string breaks the UI slider widget and causes `.mul(...)` / `.lpf(...)`
+/// to evaluate to `NaN` and silence the voice.
+fn heal_string_labeled_sliders(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut i = 0usize;
+    let mut state = SourceScanState::Code;
+
+    while i < source.len() {
+        let rest = &source[i..];
+
+        match state {
+            SourceScanState::Code => {
+                if rest.starts_with("//") {
+                    output.push_str("//");
+                    i += 2;
+                    state = SourceScanState::LineComment;
+                    continue;
+                }
+                if rest.starts_with("/*") {
+                    output.push_str("/*");
+                    i += 2;
+                    state = SourceScanState::BlockComment;
+                    continue;
+                }
+
+                if let Some((open_paren_pos, after_comma_pos)) =
+                    string_labeled_slider_prefix_at(source, i)
+                {
+                    output.push_str(&source[i..=open_paren_pos]);
+                    i = after_comma_pos;
+                    continue;
+                }
+
+                let ch = rest.chars().next().expect("i is inside source");
+                output.push(ch);
+                i += ch.len_utf8();
+                state = match ch {
+                    '\'' => SourceScanState::SingleQuoted,
+                    '"' => SourceScanState::DoubleQuoted,
+                    '`' => SourceScanState::Template,
+                    _ => SourceScanState::Code,
+                };
+            }
+            SourceScanState::SingleQuoted
+            | SourceScanState::DoubleQuoted
+            | SourceScanState::Template => {
+                let ch = rest.chars().next().expect("i is inside source");
+                output.push(ch);
+                i += ch.len_utf8();
+                if ch == '\\' {
+                    if i < source.len() {
+                        let escaped = source[i..].chars().next().expect("i is inside source");
+                        output.push(escaped);
+                        i += escaped.len_utf8();
+                    }
+                } else if (state == SourceScanState::SingleQuoted && ch == '\'')
+                    || (state == SourceScanState::DoubleQuoted && ch == '"')
+                    || (state == SourceScanState::Template && ch == '`')
+                {
+                    state = SourceScanState::Code;
+                }
+            }
+            SourceScanState::LineComment => {
+                let ch = rest.chars().next().expect("i is inside source");
+                output.push(ch);
+                i += ch.len_utf8();
+                if ch == '\n' {
+                    state = SourceScanState::Code;
+                }
+            }
+            SourceScanState::BlockComment => {
+                if rest.starts_with("*/") {
+                    output.push_str("*/");
+                    i += 2;
+                    state = SourceScanState::Code;
+                } else {
+                    let ch = rest.chars().next().expect("i is inside source");
+                    output.push(ch);
+                    i += ch.len_utf8();
+                }
+            }
+        }
+    }
+
+    output
+}
+
+fn string_labeled_slider_prefix_at(source: &str, start: usize) -> Option<(usize, usize)> {
+    let rest = source.get(start..)?;
+    if !rest.starts_with("slider") {
+        return None;
+    }
+    if start > 0 {
+        let prev = source[..start].chars().next_back()?;
+        if is_identifier_char(prev) {
+            return None;
+        }
+    }
+    let after_name = start + "slider".len();
+    if let Some(ch) = source[after_name..].chars().next() {
+        if is_identifier_char(ch) {
+            return None;
+        }
+    }
+
+    let mut cursor = after_name;
+    skip_ascii_whitespace(source, &mut cursor);
+    if source.as_bytes().get(cursor) != Some(&b'(') {
+        return None;
+    }
+    let open_paren_pos = cursor;
+    cursor += 1;
+    skip_ascii_whitespace(source, &mut cursor);
+
+    let quote = *source.as_bytes().get(cursor)?;
+    if !matches!(quote, b'\'' | b'"' | b'`') {
+        return None;
+    }
+    cursor += 1;
+    while cursor < source.len() {
+        let b = source.as_bytes()[cursor];
+        if b == b'\\' {
+            cursor += 2;
+            continue;
+        }
+        if b == quote {
+            cursor += 1;
+            break;
+        }
+        if b == b'\n' {
+            return None;
+        }
+        cursor += 1;
+    }
+
+    skip_ascii_whitespace(source, &mut cursor);
+    if source.as_bytes().get(cursor) != Some(&b',') {
+        return None;
+    }
+    cursor += 1;
+    skip_ascii_whitespace(source, &mut cursor);
+
+    // Confirm the next argument starts with a numeric literal so we only strip
+    // a leading label when a real numeric default value immediately follows.
+    let num_end = source[cursor..]
+        .find([',', ')'])
+        .map(|rel| cursor + rel)?;
+    let second_arg = source[cursor..num_end].trim();
+    let parsed = second_arg.parse::<f64>().ok()?;
+    if !parsed.is_finite() {
+        return None;
+    }
+
+    Some((open_paren_pos, cursor))
+}
+
+/// Validates that every `slider(...)` call outside comments/strings has a finite
+/// numeric literal as its first argument (`slider(defaultValue, min, max, step)`).
+fn reject_invalid_slider_arguments(source: &str) -> Result<(), String> {
+    if heal_string_labeled_sliders(source) != source {
+        return Err(
+            "Strudel preflight failed: `slider(...)` contains a string label as its first argument (for example `slider(\"filterCutoff\", 800, 300, 1500)`). Strudel's `slider(value, min, max, step)` function only accepts numeric arguments; passing a string label breaks the UI slider and produces `NaN` audio parameters. Use `const filterCutoff = slider(800, 300, 1500, 10)` instead."
+                .to_string(),
+        );
+    }
+
+    let masked = mask_comments_and_strings(source)?;
+    let chars: Vec<char> = masked.chars().collect();
+    let wanted: Vec<char> = "slider".chars().collect();
+    let mut i = 0usize;
+
+    while i + wanted.len() <= chars.len() {
+        if chars[i..i + wanted.len()] == wanted[..]
+            && (i == 0 || !is_identifier_char(chars[i - 1]))
+            && (i + wanted.len() == chars.len() || !is_identifier_char(chars[i + wanted.len()]))
+        {
+            let mut open = i + wanted.len();
+            while open < chars.len() && chars[open].is_whitespace() {
+                open += 1;
+            }
+            if open < chars.len() && chars[open] == '(' {
+                let mut close = open + 1;
+                let mut depth = 1i32;
+                while close < chars.len() && depth > 0 {
+                    match chars[close] {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth > 0 {
+                        close += 1;
+                    }
+                }
+                if close <= chars.len() {
+                    let args_str: String = chars[open + 1..close].iter().collect();
+                    let first_arg = args_str.split(',').next().unwrap_or("").trim();
+                    if first_arg.is_empty() || first_arg.parse::<f64>().is_err() {
+                        return Err(
+                            "Strudel preflight failed: `slider(...)` must start with a numeric default value (`slider(value, min, max, step)`), such as `slider(800, 200, 4000, 10)`. Do not pass strings or variables as the first argument to `slider(...)`."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            i += wanted.len();
+        } else {
+            i += 1;
+        }
+    }
+
+    Ok(())
+}
+
+/// Rejects invented role-name synth strings inside `.s("...")` or `.sound("...")`
+/// (such as `.s("pad")`, `.s("pluck")`, `.s("lead")`, `.s("synth")`, `.s("strings")`).
+/// Strudel does not have built-in synths or default sample folders with those role
+/// names, so they fail silently at playback time without throwing a JS error.
+fn reject_hallucinated_synth_role_names(source: &str) -> Result<(), String> {
+    const HALLUCINATED_SYNTH_ROLES: &[&str] = &[
+        "pad", "pads", "pluck", "plucks", "lead", "leads", "synth", "synths", "strings",
+        "keys", "chords", "sub", "subbass", "drone", "ambience", "arp",
+    ];
+
+    for (method_is_chained, literal) in extract_sound_call_literals(source) {
+        // Focus on `.s("...")` / `.sound("...")` method calls or standalone `s("pad")`
+        // where a role name is used in place of a real oscillator or sample bank.
+        for raw_token in literal.split(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '[' | ']' | '<' | '>' | '(' | ')' | ',' | '~')
+        }) {
+            let base = raw_token
+                .split(['*', '/', '@', ':', '!', '?'])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if base.is_empty() {
+                continue;
+            }
+            let lower = base.to_ascii_lowercase();
+            if HALLUCINATED_SYNTH_ROLES.contains(&lower.as_str()) {
+                let context_hint = if method_is_chained {
+                    format!(".s(\"{base}\")")
+                } else {
+                    format!("s(\"{base}\")")
+                };
+                return Err(format!(
+                    "Strudel preflight failed: `{context_hint}` uses the role name '{base}' instead of a real Strudel oscillator or sample bank, which causes silent playback. For pitched synth layers, use a verified built-in waveform (`\"sawtooth\"`, `\"supersaw\"`, `\"triangle\"`, `\"sine\"`, `\"square\"`, `\"pulse\"`) or a General MIDI instrument (`\"gm_pad_warm\"`, `\"gm_epiano1\"`, `\"gm_acoustic_guitar_nylon\"`, `\"piano\"`)."
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_sound_call_literals(source: &str) -> Vec<(bool, String)> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut results = Vec::new();
+    let mut i = 0usize;
+    let mut state = LexState::Code;
+    let mut escaped = false;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        let next = chars.get(i + 1).copied();
+        match state {
+            LexState::Code => {
+                if ch == '/' && next == Some('/') {
+                    state = LexState::LineComment;
+                    i += 2;
+                    continue;
+                }
+                if ch == '/' && next == Some('*') {
+                    state = LexState::BlockComment;
+                    i += 2;
+                    continue;
+                }
+                if matches!(ch, '\'' | '"' | '`') {
+                    state = match ch {
+                        '\'' => LexState::Single,
+                        '"' => LexState::Double,
+                        _ => LexState::Template,
+                    };
+                    i += 1;
+                    continue;
+                }
+                if is_identifier_start(ch) {
+                    let start = i;
+                    let is_chained = start > 0 && chars[start - 1] == '.';
+                    i += 1;
+                    while i < chars.len() && is_identifier_char(chars[i]) {
+                        i += 1;
+                    }
+                    let name: String = chars[start..i].iter().collect();
+                    if matches!(name.as_str(), "s" | "sound") {
+                        let mut open = i;
+                        while open < chars.len() && chars[open].is_whitespace() {
+                            open += 1;
+                        }
+                        if open < chars.len() && chars[open] == '(' {
+                            let mut arg = open + 1;
+                            while arg < chars.len() && chars[arg].is_whitespace() {
+                                arg += 1;
+                            }
+                            if arg < chars.len() && matches!(chars[arg], '\'' | '"' | '`') {
+                                let quote = chars[arg];
+                                let mut end = arg + 1;
+                                let mut local_escaped = false;
+                                let mut value = String::new();
+                                while end < chars.len() {
+                                    let current = chars[end];
+                                    if local_escaped {
+                                        value.push(current);
+                                        local_escaped = false;
+                                    } else if current == '\\' {
+                                        local_escaped = true;
+                                    } else if current == quote {
+                                        break;
+                                    } else {
+                                        value.push(current);
+                                    }
+                                    end += 1;
+                                }
+                                results.push((is_chained, value));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+            LexState::Single | LexState::Double | LexState::Template => {
+                let quote = match state {
+                    LexState::Single => '\'',
+                    LexState::Double => '"',
+                    LexState::Template => '`',
+                    _ => unreachable!(),
+                };
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == quote {
+                    state = LexState::Code;
+                }
+                i += 1;
+            }
+            LexState::LineComment => {
+                if ch == '\n' {
+                    state = LexState::Code;
+                }
+                i += 1;
+            }
+            LexState::BlockComment => {
+                if ch == '*' && next == Some('/') {
+                    state = LexState::Code;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Rejects multi-movement arrangements that place 3 or more declared `stack(...)`
+/// section variables inside `cat(...)` / `fastcat(...)` / `seq(...)` or call
+/// `.clip(...)` on a `stack(...)` section. `cat(...)` switches sections every
+/// single cycle (~2 seconds) instead of holding each movement for 8–16 bars.
+fn reject_single_cycle_section_cat(masked_code: &str) -> Result<(), String> {
+    let mut stack_sections = HashSet::new();
+    for line in masked_code.lines() {
+        let trimmed = line.trim();
+        if !is_variable_declaration(trimmed) {
+            continue;
+        }
+        if let Some((left, right)) = trimmed.split_once('=') {
+            let name = declared_name(left);
+            if !name.is_empty() && contains_identifier_call(right, "stack") {
+                stack_sections.insert(name.to_string());
+            }
+        }
+    }
+
+    if stack_sections.len() < 3 {
+        return Ok(());
+    }
+
+    let chars: Vec<char> = masked_code.chars().collect();
+    for call_name in ["cat", "fastcat", "seq"] {
+        let target: Vec<char> = call_name.chars().collect();
+        let mut i = 0usize;
+        while i + target.len() <= chars.len() {
+            if chars[i..i + target.len()] == target[..]
+                && (i == 0 || !is_identifier_char(chars[i - 1]))
+                && (i + target.len() == chars.len() || !is_identifier_char(chars[i + target.len()]))
+            {
+                let mut open = i + target.len();
+                while open < chars.len() && chars[open].is_whitespace() {
+                    open += 1;
+                }
+                if open < chars.len() && chars[open] == '(' {
+                    let mut close = open + 1;
+                    let mut depth = 1i32;
+                    let mut top_level_args = Vec::new();
+                    let mut current_arg = String::new();
+                    while close < chars.len() && depth > 0 {
+                        let ch = chars[close];
+                        match ch {
+                            '(' | '[' | '{' => {
+                                depth += 1;
+                                current_arg.push(ch);
+                            }
+                            ')' | ']' | '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    top_level_args.push(current_arg.trim().to_string());
+                                    break;
+                                }
+                                current_arg.push(ch);
+                            }
+                            ',' if depth == 1 => {
+                                top_level_args.push(current_arg.trim().to_string());
+                                current_arg.clear();
+                            }
+                            _ => current_arg.push(ch),
+                        }
+                        close += 1;
+                    }
+
+                    let matched_sections = top_level_args
+                        .iter()
+                        .filter(|arg| {
+                            let root_ident = arg
+                                .split(|ch: char| !is_identifier_char(ch))
+                                .find(|s| !s.is_empty())
+                                .unwrap_or("");
+                            stack_sections.contains(root_ident)
+                        })
+                        .count();
+
+                    if matched_sections >= 3 {
+                        return Err(format!(
+                            "Strudel preflight failed: {matched_sections} multi-stem `stack(...)` sections are sequenced inside `{call_name}(...)`, which flips between sections every single cycle (~2 seconds) instead of playing full multi-bar movements. Use `arrange([8, intro], [16, groove], [16, peak], ...)` so each section holds for 8–16 cycles, and do not call `.clip(...)` on a `stack(...)` section."
+                        ));
+                    }
+                }
+                i += target.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// If `start` is the beginning of a supported filter method call with the sole
@@ -699,8 +1202,6 @@ fn validate_mini_notation_delimiters(source: &str) -> Result<(), String> {
 }
 
 fn validate_literal_delimiters(literal: &str, start_line: usize) -> Result<(), String> {
-    // Avoid interpreting ordinary strings as mini-notation unless they contain
-    // one of its grouping/alternation delimiters.
     if !literal
         .chars()
         .any(|ch| matches!(ch, '[' | ']' | '{' | '}' | '<' | '>'))
@@ -790,8 +1291,6 @@ fn has_final_root_expression(masked_code: &str) -> bool {
     last_kind == Some(Kind::Root)
 }
 
-// A private namespace lets the statement classifier keep a tiny internal enum
-// without exposing it in this module's public interface.
 mod impl_statement_kind {
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub enum Kind {
@@ -808,8 +1307,6 @@ fn update_statement_kind(segment: &str, last_kind: &mut Option<impl_statement_ki
         return;
     }
 
-    // A leading dot on a new line is a continuation of the previous chain. It
-    // does not turn a preceding declaration into an evaluated root expression.
     if trimmed.starts_with('.') {
         return;
     }
@@ -845,9 +1342,6 @@ fn update_statement_kind(segment: &str, last_kind: &mut Option<impl_statement_ki
     if has_call || has_member_or_operator || is_bare_identifier {
         *last_kind = Some(Kind::Root);
     } else {
-        // Leave a previous kind intact only for ordinary blank/comment pieces
-        // (which have already been filtered). An unrecognized statement cannot
-        // establish a valid final root.
         *last_kind = None;
     }
 }
@@ -1123,13 +1617,7 @@ enum LexState {
     BlockComment,
 }
 
-/// Rejects a high-confidence silent-output hazard: treating a standard Strudel
-/// `slider(...)` control as a plain JavaScript number. In the REPL, slider calls
-/// are transpiled into pattern-valued numeric controls, so JavaScript operators
-/// such as `cutoff * 0.8` or `intensity > 0.7 ? ...` can escape Strudel's pattern
-/// algebra and produce invalid parameter values. Returning an error causes the
-/// existing generation loop to retry with specific feedback instead of accepting
-/// a structurally balanced but potentially silent score.
+/// Rejects treating a standard Strudel `slider(...)` control as a plain JavaScript number.
 fn reject_javascript_slider_arithmetic(masked_code: &str) -> Result<(), String> {
     for name in extract_slider_names(masked_code) {
         if identifier_has_arithmetic_or_comparison_use(masked_code, &name) {
@@ -1157,8 +1645,7 @@ fn reject_invented_root_wrapper(masked_code: &str) -> Result<(), String> {
 }
 
 /// Rejects declared `slider(...)` controls and named Strudel pattern stems that
-/// are never referenced anywhere else in the program. This prevents orphaned
-/// solos, silent sub-bass layers, and dead UI sliders from passing preflight.
+/// are never referenced anywhere else in the program.
 fn reject_unused_sliders_and_pattern_stems(masked_code: &str) -> Result<(), String> {
     for name in extract_slider_names(masked_code) {
         if identifier_occurrences(masked_code, &name) <= 1 {
@@ -1185,7 +1672,6 @@ fn reject_unused_sliders_and_pattern_stems(masked_code: &str) -> Result<(), Stri
         if name.is_empty() || name.starts_with('_') {
             continue;
         }
-        // Ignore arrow/function definitions and plain non-pattern constants.
         if right.contains("=>") || right.trim_start().starts_with("function") {
             continue;
         }
@@ -1302,7 +1788,7 @@ fn count_arranged_cycles(masked_code: &str) -> usize {
     let Some(start) = find_identifier_call_start(&chars, "arrange") else {
         return 0;
     };
-    let mut i = start + 1; // opening parenthesis
+    let mut i = start + 1;
     let mut paren_depth = 1i32;
     let mut bracket_depth = 0i32;
     let mut brace_depth = 0i32;
@@ -1395,8 +1881,6 @@ pub fn check_clone_or_stagnation(new_code: &str, previous_code: Option<&str>) ->
 }
 
 /// Removes model reasoning blocks and extracts a fenced candidate when available.
-/// For unfenced output, leading prose is discarded and common trailing prose is
-/// removed. Leading metadata comments are retained. Source syntax is not rewritten.
 fn strip_thinking_and_extract_code(raw: &str) -> String {
     let mut text = raw.to_string();
     while let Some(start) = text.find("<think>") {
@@ -1725,6 +2209,37 @@ mod autonomy_regression_tests {
         assert!(result.contains("slider(0.4, 0, 1, 0.05)"));
         let analysis = analyze_ast_health(&result, Vec::new(), true);
         assert_eq!(analysis.slider_names, vec!["level"]);
+    }
+
+    #[test]
+    fn string_labeled_slider_is_auto_healed_in_compile_and_rejected_in_raw_validation() {
+        let raw_code = "setcps(0.5)\nconst filterCutoff = slider(\"filterCutoff\", 800, 300, 1500)\nconst pads = note(\"[e2 g2 b2 d3]\").s(\"sawtooth\").lpf(filterCutoff)\npads";
+        assert!(validate_strudel_ast(raw_code).is_err());
+        let healed = compile_and_heal_strudel(raw_code).unwrap();
+        assert!(healed.contains("slider(800, 300, 1500)"));
+        assert!(!healed.contains("\"filterCutoff\""));
+    }
+
+    #[test]
+    fn hallucinated_synth_role_names_pad_and_pluck_are_rejected() {
+        let pad_code =
+            "setcps(0.5)\nconst pads = note(\"[e2 g2 b2 d3]\").s(\"pad\").lpf(800)\npads";
+        let err = compile_and_heal_strudel(pad_code).unwrap_err();
+        assert!(err.contains("role name 'pad'"));
+        assert!(err.contains("sawtooth"));
+
+        let pluck_code =
+            "setcps(0.5)\nconst pluck = note(\"<e3 g3 b3 d4>\").s(\"pluck\")\npluck";
+        let err2 = compile_and_heal_strudel(pluck_code).unwrap_err();
+        assert!(err2.contains("role name 'pluck'"));
+    }
+
+    #[test]
+    fn single_cycle_cat_over_three_or_more_section_stacks_is_rejected() {
+        let code = "setcps(0.5)\nconst intro = stack(s(\"bd\"))\nconst groove = stack(s(\"bd sd\"))\nconst peak = stack(s(\"bd*4\"))\ncat(intro.clip(0.5), groove.clip(1.2), peak.clip(1.5))";
+        let err = compile_and_heal_strudel(code).unwrap_err();
+        assert!(err.contains("sequenced inside `cat(...)`"));
+        assert!(err.contains("arrange([8, intro]"));
     }
 
     #[test]
