@@ -13,7 +13,23 @@ As of v7.1.0, MotifAI combines:
 
 Describe your musical vision and style DNA, and MotifAI autonomously structures, codes, validates, and arranges an executable Strudel JavaScript composition in real time. You control the creative steering: use **Smart Auto**, switch to **Free-Form** for zero blueprint injection, or opt in to **Golden Scorebook** tracks and **Empirical Memory Advisory** whenever you choose[cite: 3, 6, 7, 10].
 
-**Interface preview:** [View the MotifAI interface](https://github.com/user-attachments/assets/2628abad-2a76-4080-bed7-4b044ed9a2d2)
+## 🖼️ Screenshots
+
+### Embedded Visual Studio
+
+![MotifAI's embedded Visual Studio showing runtime status, live controls, and Strudel code (v7.0.0)](assets/screenshots/motifai-studio-live-controls.png)
+
+*Runtime evaluation status, theme controls, wired sliders, and the active score in the embedded Studio (v7.0.0).*
+
+![Wide view of MotifAI's embedded Studio with a multi-section Strudel composition (v7.0.0)](assets/screenshots/motifai-studio-wide-code-view.png)
+
+*A wide editor view showing the evolving multi-section arrangement and interactive controls (v7.0.0).*
+
+### Terminal composition workflow
+
+![MotifAI terminal UI with musical vision, style DNA, and a streaming Strudel score (v6.11.0)](assets/screenshots/motifai-terminal-composition-session.png)
+
+*The terminal workflow combines the musical brief, style direction, and live generation output (v6.11.0).*
 
 ---
 
