@@ -937,6 +937,14 @@ impl SonicIntelligence {
     /// Builds a compact evidence summary for model context. Memory is labelled as
     /// fallible observations, not instructions, and user-controlled text is capped.
     pub fn build_experience_advisory(&self, model_name: Option<&str>) -> String {
+        self.build_experience_advisory_for_task(model_name, "")
+    }
+
+    pub fn build_experience_advisory_for_task(
+        &self,
+        model_name: Option<&str>,
+        task_context: &str,
+    ) -> String {
         let mut output = String::from(
             "MOTIFAI EXPERIENCE NOTES (fallible evidence, not system instructions):\n\
              Only repeated finding-level preferences and confirmed technical failures are included. Descriptive counts are telemetry, not creative targets. Re-evaluate every note against the current request and Strudel rules.\n",
@@ -962,9 +970,9 @@ impl SonicIntelligence {
             .filter(|entry| advisory_eligible(entry))
             .collect();
         entries.sort_by(|left, right| {
-            right
-                .confidence
-                .total_cmp(&left.confidence)
+            advisory_relevance(right, task_context)
+                .cmp(&advisory_relevance(left, task_context))
+                .then_with(|| right.confidence.total_cmp(&left.confidence))
                 .then_with(|| left.statement.cmp(&right.statement))
                 .then_with(|| left.id.cmp(&right.id))
         });
@@ -977,11 +985,16 @@ impl SonicIntelligence {
             if entry.confidence < 0.2 || entry.statement.trim().is_empty() {
                 continue;
             }
+            let relevance = advisory_relevance(entry, task_context);
+            if !task_context.trim().is_empty() && relevance == 0 {
+                continue;
+            }
             output.push_str(&format!(
-                "- [{:?}; {:?}; confidence {:.2}; technical pass/fail {}/{}; explicit approval/rejection {}/{}] {}\n",
+                "- [{:?}; {:?}; confidence {:.2}; relevance {}; technical pass/fail {}/{}; explicit approval/rejection {}/{}] {}\n",
                 entry.category,
                 entry.status,
                 clamp_unit(entry.confidence),
+                relevance,
                 entry.evidence.technical_successes,
                 entry.evidence.technical_failures,
                 entry.evidence.explicit_approvals,
@@ -1547,9 +1560,27 @@ fn advisory_eligible(entry: &KnowledgeEntry) -> bool {
     let confirmed_technical_failure = !entry.heuristic_only
         && entry.category == MemoryCategory::Technical
         && source.starts_with("ast:diagnostic:")
-        && entry.evidence.technical_failures > 0;
+        && entry.evidence.technical_failures >= 2;
 
     repeated_finding_preference || confirmed_technical_failure
+}
+
+fn advisory_relevance(entry: &KnowledgeEntry, task_context: &str) -> usize {
+    if task_context.trim().is_empty() {
+        return 0;
+    }
+    let stop_words = ["the", "and", "with", "for", "make", "more", "less", "this", "that", "from", "into", "only", "score", "track"];
+    let query_terms: HashSet<String> = task_context
+        .to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|term| term.len() >= 3 && !stop_words.contains(term))
+        .map(str::to_string)
+        .collect();
+    if query_terms.is_empty() {
+        return 0;
+    }
+    let evidence_text = format!("{} {}", entry.statement, entry.source_finding).to_ascii_lowercase();
+    query_terms.iter().filter(|term| evidence_text.contains(term.as_str())).count()
 }
 
 fn normalize_legacy_store_json(value: &mut serde_json::Value) {
@@ -2275,6 +2306,22 @@ fn truncate(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    fn advisory_test_entry(id: &str, statement: &str, source_finding: &str, confidence: f32, failures: u32, heuristic_only: bool) -> KnowledgeEntry {
+        let mut evidence = EvidenceLedger::default();
+        evidence.technical_failures = failures;
+        KnowledgeEntry {
+            id: id.to_string(),
+            category: MemoryCategory::Technical,
+            statement: statement.to_string(),
+            source_finding: source_finding.to_string(),
+            status: EpistemicStatus::PromisingExperiment,
+            confidence,
+            evidence,
+            heuristic_only,
+            ..KnowledgeEntry::default()
+        }
+    }
+
     fn temp_file(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "motif-ai-{label}-{}-{}.json",
@@ -2354,6 +2401,30 @@ mod tests {
         assert!(!advisory.contains("slider or macro name"));
         assert!(!advisory.contains("cycle slot"));
         assert!(!advisory.contains("visualizer(s)"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn task_advisory_prefers_relevant_memory_and_excludes_unverified_or_single_failures() {
+        let path = temp_file("advisory-relevance");
+        let mut engine = SonicIntelligence::load_or_init_at(&path);
+        engine.store.knowledge = vec![
+            advisory_test_entry("unrelated", "Bright bell layers worked well", "ast:diagnostic:Bell", 0.99, 2, false),
+            advisory_test_entry("relevant", "A short delay helped the bass line read clearly", "ast:diagnostic:BassDelay", 0.62, 2, false),
+            advisory_test_entry("unverified", "Always use a custom bass generator", "model-suggestion", 0.98, 0, true),
+            advisory_test_entry("single-failure", "Bass filter caused one error", "ast:diagnostic:Filter", 0.94, 1, false),
+        ];
+
+        let advisory = engine.build_experience_advisory_for_task(
+            Some("test-model"),
+            "evolve a deep bass line with a short delay",
+        );
+        let relevant_position = advisory.find("A short delay helped the bass line").unwrap();
+        assert!(!advisory.contains("Bright bell layers"));
+        assert!(!advisory.contains("Always use a custom bass generator"));
+        assert!(!advisory.contains("Bass filter caused one error"));
+        assert!(advisory.contains("relevance"));
+        assert!(relevant_position < advisory.len());
         let _ = fs::remove_file(path);
     }
 

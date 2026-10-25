@@ -1,14 +1,14 @@
-# 🌀 MotifAI v6.8.0
+# 🌀 MotifAI v7.1.0
 
 **An autonomous, local-AI symphonic song architect built on Rust and Strudel.**
 
-MotifAI bridges local large language models (LLMs), including Qwen2.5-Coder, Devstral, Mistral, and DeepSeek, with the Strudel.cc live-coding music environment.
+MotifAI bridges locally installed Ollama text-generation models—including compatible Qwen, DeepSeek, GLM, Nemotron, Devstral, and Mistral variants—with the Strudel.cc live-coding music environment.
 
-As of v6.8.0, MotifAI combines:
+As of v7.1.0, MotifAI combines:
 
 - A work-mode-aware Composition Orchestrator.
 - The 65-architecture Master Composition & Performance Palette.
-- Live NDJSON token streaming with VRAM-aware inference profiles.
+- Recipe-based request compilation with task-aware inference profiles and live NDJSON token streaming.
 - A two-stage verification loop: Conservative Lexical Preflight followed by Embedded Strudel REPL Runtime Evaluation.
 
 Describe your musical vision and style DNA, and MotifAI autonomously structures, codes, validates, and arranges an executable Strudel JavaScript composition in real time. You control the creative steering: use **Smart Auto**, switch to **Free-Form** for zero blueprint injection, or opt in to **Golden Scorebook** tracks and **Empirical Memory Advisory** whenever you choose[cite: 3, 6, 7, 10].
@@ -33,17 +33,17 @@ Choose one of three modes:
 
 MotifAI automatically classifies each request into one of four work modes: **New Composition**, **Targeted Edit**, **Composition Evolution**, or **Technical Repair**. Narrow edit requests preserve unrelated working stems, while evolution passes inspect existing stem roles and develop the arrangement without freezing section maps.
 
-### ⚡ VRAM-Aware Inference Profiles & Live Streaming
+### ⚡ Ollama-Metadata-Aware Inference Profiles & Live Streaming
 
-MotifAI automatically prioritizes fast, GPU-resident 14B coder models, such as `qwen2.5-coder:14b`, for interactive responsiveness on GPUs with 8 GB of VRAM. Larger 24B–32B models remain available through `Ctrl+M`.
+MotifAI discovers Ollama text-generation models and excludes embedding-only models from `Ctrl+M`. It uses reported model capabilities, context length, and parameter count to select a task-aware profile; parameter count is only a size hint and does not predict exact VRAM use. Context and output limits can be overridden with `MOTIFAI_NUM_CTX` and `MOTIFAI_NUM_PREDICT`, subject to the selected model's reported context limit.
 
-Tokens stream live over NDJSON with real-time tokens-per-second telemetry and task-aware context/output caps. Available profiles are **interactive-fast**, **interactive-extended**, **deep-balanced**, and **deep-extended**.
+Tokens stream live over NDJSON with throughput telemetry. The request compiler distinguishes new compositions, targeted edits, evolutions, and compact repairs, and reports the effective work mode, profile, context, output cap, and thinking policy in diagnostics. Ollama prompt-token counts are logged alongside the conservative local estimate when the server provides them.
 
 ### 🔬 Two-Stage Verification & Stateful Surgical Repair
 
 Every candidate score must first pass **Conservative Lexical Preflight**, which checks balanced delimiters, mini-notation brackets, tempo presence, wired sliders, and active musical stems. It also repairs standalone `@number` filter strings, such as `.lpf("@200")` into `.lpf(200)`, without rewriting your melodies.
 
-Candidates that pass preflight are then evaluated inside the pinned `@strudel/repl@1.3.0` browser runtime. If preflight or runtime evaluation fails, MotifAI feeds the exact error and failed candidate code into a low-temperature repair pass at `0.25`.
+Candidates that pass preflight are evaluated inside the pinned `@strudel/repl@1.3.0` browser runtime when it is available. A missing or unavailable runtime is reported as **unverified**, never as a successful evaluation. Failed preflight/runtime checks can enter a bounded repair flow; compact repair uses a lower-temperature policy and preserves the failed candidate for diagnosis.
 
 ### 📀 Opt-In Golden Scorebook · `Ctrl+B` / `Ctrl+T`
 
@@ -65,7 +65,7 @@ Step backward with `Ctrl+Z` and forward with `Ctrl+U` through generated and evol
 
 MotifAI serves the local Visual Studio at `127.0.0.1:7777` using Base64-only editor hydration to prevent HTML comment injection, token-verified runtime reports, and client heartbeat tracking.
 
-Pasted HTTP(S) reference URLs are streamed with a **256 KB cap**, stripped of script/style tags, blocked from private/loopback networks, and isolated as untrusted reference data.
+Pasted HTTP(S) reference URLs are streamed with a **256 KB cap**, stripped of script/style tags, blocked from private/loopback networks, and isolated as untrusted reference data. Each redirect destination is checked, DNS results are checked and pinned for that request, and redirect count is bounded.
 
 ---
 
@@ -83,12 +83,12 @@ You need **Rust** and **Ollama** installed to run MotifAI.
 
 #### Recommended environment settings: keep-alive & context
 
-MotifAI v6.8.0 automatically sizes context windows by model class:
+MotifAI v7.1.0 chooses a base context/output profile by task and reported model metadata, then clamps context to the model's reported limit where available. The recipe compiler estimates the complete system-plus-user request conservatively, trims optional references in order, and stops with an actionable error if the mandatory brief, rules, and existing score still exceed the effective input/output budget. `strudel_rules.md` is resolved from the project directory; set `MOTIFAI_STRUDEL_RULES` to an alternate rulebook path if needed. If the required rules cannot be read, generation stops visibly.
 
 - **14B models:** 32,768 tokens.
 - **24B–32B models:** 16,384–24,576 tokens.
 
-These settings are intended to help GPUs with 8 GB of VRAM avoid stalling or spilling excessive KV cache into system RAM.
+These are policy defaults. Actual memory use and performance depend on model quantization, Ollama version, runtime offload behavior, and available GPU/system memory.
 
 To keep models warm in memory between runs on Windows:
 
@@ -98,7 +98,7 @@ To keep models warm in memory between runs on Windows:
 
 ### Step 2: Pull the Recommended AI Model
 
-Open a terminal and pull a coding model. **`qwen2.5-coder:14b`** is the recommended default for fast, GPU-resident interactive composition on GPUs with 8 GB or more of VRAM. You can also install **`qwen2.5-coder:32b`** for offline or deep-composition passes.
+Open a terminal and pull a coding model. **`qwen2.5-coder:14b`** is a useful interactive starting point, while larger models can be selected through `Ctrl+M` when their memory and latency costs fit your system.
 
 - **Recommended interactive default:** `ollama pull qwen2.5-coder:14b`
 - **Optional heavy model:** `ollama pull qwen2.5-coder:32b`

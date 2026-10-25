@@ -2105,6 +2105,15 @@ mod autonomy_regression_tests {
     use super::*;
 
     #[test]
+    fn fenced_strudel_response_excludes_reasoning_and_trailing_prose() {
+        let raw = "<think>Plan a bass line and explain why.</think>\n```strudel\nsetcps(0.5)\nconst drums = s(\"bd*4\")\ndrums\n```\nExplanation: the drums are steady.";
+        let code = compile_and_heal_strudel(raw).unwrap();
+        assert_eq!(code, "setcps(0.5)\nconst drums = s(\"bd*4\")\ndrums");
+        assert!(!code.contains("Plan a bass line"));
+        assert!(!code.contains("Explanation:"));
+    }
+
+    #[test]
     fn recurring_motif_across_sections_is_preserved() {
         let code = "setcps(0.5)\nconst intro = stack(note(\"[c4 eb4 g4]\"))\nconst drop = stack(note(\"[c4 eb4 g4]\").gain(0.8))\narrange([4, intro], [4, drop])";
         assert_eq!(compile_and_heal_strudel(code).unwrap(), code);

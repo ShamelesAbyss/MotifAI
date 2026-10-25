@@ -40,14 +40,14 @@ use tokio::{
     task::JoinHandle,
 };
 
-const APP_VERSION: &str = "7.0.0";
+const APP_VERSION: &str = "7.1.0";
 const LOOPBACK_IP: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 7777;
 const OLLAMA_PORT: u16 = 11434;
 
 const STRUDEL_WEB_HASH: &str = concat!("https", "://", "strudel.cc/#");
 // Pin the embedded REPL version so runtime evaluation behavior is reproducible.
-const STRUDEL_REPL_CDN: &str = concat!("https", "://", "[unpkg.com/@strudel/repl@1.3.0](https://unpkg.com/@strudel/repl@1.3.0)");
+const STRUDEL_REPL_CDN: &str = concat!("https", "://", "unpkg.com/@strudel/repl@1.3.0");
 const MAX_GENERATION_ATTEMPTS: usize = 5;
 const RUNTIME_VERIFY_WAIT_SECS: u64 = 30;
 const STUDIO_CLIENT_CONNECT_GRACE_SECS: u64 = 8;
@@ -175,49 +175,61 @@ struct OllamaRequest {
     options: OllamaOptions,
 }
 
+fn ollama_response_piece(chunk: &Value) -> Option<&str> {
+    // Ollama emits reasoning in a separate `thinking` field when think=true;
+    // only the final `response` channel is ever assembled as Strudel source.
+    chunk.get("response").and_then(Value::as_str)
+}
+
 /// Resolves an inference profile via `recipe_engine::resolve_ui_inference_profile`
 /// so the TUI model switcher and startup status bar share the exact same profile logic.
 fn resolve_inference_profile(
     model: &str,
     user_prompt: &str,
     style_ref: &str,
+    model_hints: recipe_engine::ModelInferenceHints,
 ) -> recipe_engine::UiInferenceProfile {
-    recipe_engine::resolve_ui_inference_profile(model, user_prompt, style_ref)
+    recipe_engine::resolve_ui_inference_profile(model, user_prompt, style_ref, model_hints)
 }
 
-/// Selects the default model index from discovered Ollama models.
-/// Prioritizes an explicit `STRUDEL_MODEL` override first, then GPU-resident 14B coder
-/// models for fast interactive generation on 8 GB VRAM, while leaving 24B/27B/32B
-/// models available via `Ctrl+M`.
-fn select_preferred_model_index(models: &[String], explicit_env_model: Option<&str>) -> usize {
-    if models.is_empty() {
+/// Selects the default generation model from discovered Ollama models.
+/// The 14B Qwen coder preference is a convenience default only; resource and
+/// context decisions come from Ollama metadata, not the display name.
+fn select_preferred_model_index(models: &[ModelInfo], explicit_env_model: Option<&str>) -> usize {
+    let generation_indices: Vec<usize> = models
+        .iter()
+        .enumerate()
+        .filter(|(_, model)| model.supports_generation())
+        .map(|(index, _)| index)
+        .collect();
+    if generation_indices.is_empty() {
         return 0;
     }
     if let Some(target) = explicit_env_model.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(idx) = models.iter().position(|m| m.eq_ignore_ascii_case(target)) {
+        if let Some(idx) = generation_indices.iter().copied().find(|&idx| models[idx].name.eq_ignore_ascii_case(target)) {
             return idx;
         }
     }
 
-    models
+    generation_indices
         .iter()
-        .position(|m| {
-            let lower = m.to_ascii_lowercase();
+        .copied()
+        .find(|&idx| {
+            let m = &models[idx];
+            let lower = m.name.to_ascii_lowercase();
             lower.contains("qwen2.5-coder:14b") || (lower.contains("coder") && lower.contains("14b"))
         })
-        .or_else(|| models.iter().position(|m| m.to_ascii_lowercase().contains("14b")))
+        .or_else(|| generation_indices.iter().copied().find(|&i| models[i].name.to_ascii_lowercase().contains("14b")))
         .or_else(|| {
-            models.iter().position(|m| {
-                let lower = m.to_ascii_lowercase();
+            generation_indices.iter().copied().find(|&i| {
+                let m = &models[i];
+                let lower = m.name.to_ascii_lowercase();
                 lower.contains("coder") && (lower.contains("7b") || lower.contains("8b") || lower.contains("12b"))
             })
         })
-        .or_else(|| models.iter().position(|m| m.to_ascii_lowercase().contains("12b")))
-        .or_else(|| models.iter().position(|m| m.to_ascii_lowercase().contains("24b")))
-        .or_else(|| models.iter().position(|m| m.to_ascii_lowercase().contains("27b")))
-        .or_else(|| models.iter().position(|m| m.to_ascii_lowercase().contains("32b")))
-        .or_else(|| models.iter().position(|m| m.to_ascii_lowercase().contains("coder")))
-        .or_else(|| models.iter().position(|m| m.to_ascii_lowercase().contains("qwen")))
+        .or_else(|| generation_indices.iter().copied().find(|&i| models[i].name.to_ascii_lowercase().contains("12b")))
+        .or_else(|| generation_indices.iter().copied().find(|&i| models[i].name.to_ascii_lowercase().contains("coder")))
+        .or_else(|| generation_indices.first().copied())
         .unwrap_or(0)
 }
 
@@ -226,9 +238,49 @@ struct TagsResponse {
     models: Vec<ModelInfo>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 struct ModelInfo {
     name: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(default)]
+    details: ModelDetails,
+    #[serde(default)]
+    context_length: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ModelDetails {
+    #[serde(default)]
+    parameter_size: Option<String>,
+    #[serde(default)]
+    context_length: Option<u32>,
+}
+
+impl ModelInfo {
+    fn supports_generation(&self) -> bool {
+        if !self.capabilities.is_empty() {
+            return self.capabilities.iter().any(|cap| cap.eq_ignore_ascii_case("completion") || cap.eq_ignore_ascii_case("generate"));
+        }
+        let name = self.name.to_ascii_lowercase();
+        !(name.contains("embed") || name.contains("embedding"))
+    }
+
+    fn inference_hints(&self) -> recipe_engine::ModelInferenceHints {
+        let parameter_size_billions = self.details.parameter_size.as_deref().and_then(|raw| {
+            let numeric: String = raw
+                .trim()
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+                .collect();
+            numeric.parse::<f32>().ok()
+        });
+        recipe_engine::ModelInferenceHints {
+            context_length: self.context_length.or(self.details.context_length),
+            parameter_size_billions,
+            supports_thinking: self.capabilities.iter().any(|cap| cap.eq_ignore_ascii_case("thinking")),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -270,7 +322,7 @@ struct ScoreSnapshot {
 }
 
 enum BotEvent {
-    ModelsDiscovered(Vec<String>),
+    ModelsDiscovered(Vec<ModelInfo>),
     StatusUpdate(String),
     RuntimeCheckRequested {
         code: String,
@@ -291,7 +343,7 @@ struct App {
     status_message: String,
     is_generating: bool,
     active_generation_task: Option<JoinHandle<()>>,
-    available_models: Vec<String>,
+    available_models: Vec<ModelInfo>,
     model_index: usize,
     scroll_offset: u16,
     evolution_count: u32,
@@ -382,7 +434,10 @@ impl App {
             status_message: initial_status,
             is_generating: false,
             active_generation_task: None,
-            available_models: vec![default_model],
+            available_models: vec![ModelInfo {
+                name: default_model,
+                ..ModelInfo::default()
+            }],
             model_index: 0,
             scroll_offset: 0,
             evolution_count: 0,
@@ -491,10 +546,14 @@ impl App {
     }
 
     fn current_model(&self) -> String {
-        self.available_models
-            .get(self.model_index)
-            .cloned()
-            .unwrap_or_else(|| "qwen2.5-coder:14b".to_string())
+        self.current_model_info().name
+    }
+
+    fn current_model_info(&self) -> ModelInfo {
+        self.available_models.get(self.model_index).cloned().unwrap_or_else(|| ModelInfo {
+            name: "qwen2.5-coder:14b".into(),
+            ..ModelInfo::default()
+        })
     }
 
     fn mode_badge(&self) -> String {
@@ -516,7 +575,12 @@ impl App {
         if !self.available_models.is_empty() {
             self.model_index = (self.model_index + 1) % self.available_models.len();
             let model = self.current_model();
-            let profile = resolve_inference_profile(&model, &self.prompt_input, &self.style_reference);
+            let profile = resolve_inference_profile(
+                &model,
+                &self.prompt_input,
+                &self.style_reference,
+                self.current_model_info().inference_hints(),
+            );
 
             log_diag(
                 "MODEL_SWITCH",
@@ -527,10 +591,12 @@ impl App {
             );
 
             self.status_message = format!(
-                "Active Model: '{}' [{} | ctx:{}] | Palette: {} | Mode: {}",
+                "Active Model: '{}' [{} | ctx:{} out:{} think:{}] | Palette: {} | Mode: {}",
                 model,
                 profile.profile_name,
                 profile.num_ctx,
+                profile.num_predict,
+                self.current_model_info().inference_hints().supports_thinking,
                 self.blueprint_mode_label(),
                 self.mode_badge()
             );
@@ -698,11 +764,25 @@ impl App {
             .build_curated_track_advisory_with_manifest(prompt, style)
     }
 
-    fn resolve_empirical_advisory_for_generation(&self, model: &str) -> String {
+    fn resolve_empirical_advisory_for_generation(
+        &self,
+        model: &str,
+        prompt: &str,
+        style: &str,
+        existing_code: Option<&str>,
+        evo_gen: u32,
+    ) -> String {
         if !self.use_empirical_advisory {
             return String::new();
         }
-        self.intelligence.build_experience_advisory(Some(model))
+        let work_mode = orchestrator::classify_work_mode(prompt, existing_code, evo_gen);
+        let task_context = format!(
+            "musical request: {prompt}\nstyle: {style}\nwork mode: {}\nexisting score: {}",
+            work_mode.label(),
+            existing_code.unwrap_or("")
+        );
+        self.intelligence
+            .build_experience_advisory_for_task(Some(model), &task_context)
     }
 
     fn blueprint_mode_label(&self) -> String {
@@ -1349,10 +1429,10 @@ async fn discover_ollama_models(tx: mpsc::Sender<BotEvent>) {
 
     if let Ok(resp) = client.get(&tags_url).send().await {
         if let Ok(tags) = resp.json::<TagsResponse>().await {
-            let names: Vec<String> = tags.models.into_iter().map(|model| model.name).collect();
+            let models: Vec<ModelInfo> = tags.models.into_iter().filter(ModelInfo::supports_generation).collect();
 
-            if !names.is_empty() {
-                let _ = tx.send(BotEvent::ModelsDiscovered(names)).await;
+            if !models.is_empty() {
+                let _ = tx.send(BotEvent::ModelsDiscovered(models)).await;
             }
         }
     }
@@ -1361,59 +1441,126 @@ async fn discover_ollama_models(tx: mpsc::Sender<BotEvent>) {
 /// Checks whether a candidate URL is a safe public HTTP(S) target rather than a
 /// loopback, private-network, or link-local endpoint (`P1.5`).
 fn is_safe_public_scrape_url(raw_url: &str) -> bool {
-    let trimmed = raw_url.trim();
-    let rest = if let Some(r) = trimmed.strip_prefix("https://") {
-        r
-    } else if let Some(r) = trimmed.strip_prefix("http://") {
-        r
-    } else {
+    let Ok(url) = reqwest::Url::parse(raw_url.trim()) else {
         return false;
     };
-
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() {
-        return false;
-    }
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if host_port.starts_with('[') {
-        host_port.split(']').next().unwrap_or(host_port).trim_start_matches('[')
-    } else {
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-    let lower_host = host.trim().to_ascii_lowercase();
-    if lower_host.is_empty()
-        || lower_host == "localhost"
-        || lower_host.ends_with(".localhost")
-        || lower_host.ends_with(".local")
-        || lower_host == "::1"
-        || lower_host == "0.0.0.0"
-        || lower_host.starts_with("127.")
-        || lower_host.starts_with("10.")
-        || lower_host.starts_with("192.168.")
-        || lower_host.starts_with("169.254.")
-        || lower_host.starts_with("fe80:")
-        || lower_host.starts_with("fc00:")
-        || lower_host.starts_with("fd00:")
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
     {
         return false;
     }
-
-    if let Some(second_octet_str) = lower_host.strip_prefix("172.") {
-        if let Some(second_octet) = second_octet_str
-            .split('.')
-            .next()
-            .and_then(|s| s.parse::<u8>().ok())
-        {
-            if (16..=31).contains(&second_octet) {
-                return false;
-            }
-        }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return is_public_ip(ip);
     }
-
-    true
+    let lower_host = host.trim_end_matches('.').to_ascii_lowercase();
+    !lower_host.is_empty()
+        && lower_host != "localhost"
+        && !lower_host.ends_with(".localhost")
+        && !lower_host.ends_with(".local")
 }
 
-async fn scrape_reference_if_url(style_ref: &str, client: &reqwest::Client) -> String {
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let [a, b, c, d] = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified()
+                || a == 0
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || (a == 192 && b == 88 && c == 99)
+                || a >= 224
+                || (a == 255 && b == 255 && c == 255 && d == 255))
+        }
+        std::net::IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return is_public_ip(std::net::IpAddr::V4(mapped));
+            }
+            let segments = ip.segments();
+            // Accept global-unicast 2000::/3 only; this excludes unspecified,
+            // loopback, ULA, link-local, multicast, and documentation ranges.
+            (segments[0] & 0xe000) == 0x2000
+                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+                && !(segments[0] == 0x2001 && segments[1] <= 0x01ff)
+                && segments[0] != 0x2002
+                && !(segments[0] == 0x3fff && segments[1] & 0xfff0 == 0)
+        }
+    }
+}
+
+async fn client_pinned_to_public_host(url: &reqwest::Url) -> Result<reqwest::Client, String> {
+    let host = url.host_str().ok_or_else(|| "URL has no host".to_string())?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = url.port_or_known_default().ok_or_else(|| "URL has no known port".to_string())?;
+    let addrs: Vec<std::net::SocketAddr> = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(ip, port)]
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|error| format!("could not resolve reference host: {error}"))?
+            .collect()
+    };
+    if addrs.is_empty() || addrs.iter().any(|addr| !is_public_ip(addr.ip())) {
+        return Err("reference host resolves to a non-public address".into());
+    }
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(8));
+    if host.parse::<std::net::IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(host, &addrs);
+    }
+    builder.build().map_err(|error| error.to_string())
+}
+
+fn resolve_safe_redirect(current: &reqwest::Url, location: &str) -> Result<reqwest::Url, String> {
+    let next = current.join(location).map_err(|error| error.to_string())?;
+    if !is_safe_public_scrape_url(next.as_str()) {
+        return Err("redirect destination is not a public HTTP(S) URL".into());
+    }
+    Ok(next)
+}
+
+async fn get_with_safe_redirects(raw_url: &str) -> Result<reqwest::Response, String> {
+    const MAX_REDIRECTS: usize = 3;
+    let mut current = reqwest::Url::parse(raw_url).map_err(|error| error.to_string())?;
+    for redirect_count in 0..=MAX_REDIRECTS {
+        if !is_safe_public_scrape_url(current.as_str()) {
+            return Err("redirect destination is not a public HTTP(S) URL".into());
+        }
+        let client = client_pinned_to_public_host(&current).await?;
+        let response = client.get(current.clone()).send().await.map_err(|error| error.to_string())?;
+        if response.status().is_redirection() {
+            if redirect_count == MAX_REDIRECTS {
+                return Err("reference exceeded the redirect limit".into());
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "redirect response did not include a valid Location".to_string())?;
+            current = resolve_safe_redirect(&current, location)?;
+            continue;
+        }
+        return Ok(response);
+    }
+    Err("reference exceeded the redirect limit".into())
+}
+
+async fn scrape_reference_if_url(style_ref: &str) -> String {
     let mut extra_context = String::new();
     let http_prefix = concat!("http", "://");
     let https_prefix = concat!("https", "://");
@@ -1426,7 +1573,7 @@ async fn scrape_reference_if_url(style_ref: &str, client: &reqwest::Client) -> S
             }
             log_diag("SCRAPE_START", token);
 
-            if let Ok(mut resp) = client.get(token).timeout(Duration::from_secs(8)).send().await {
+            if let Ok(mut resp) = get_with_safe_redirects(token).await {
                 if !resp.status().is_success() {
                     log_diag(
                         "SCRAPE_HTTP_STATUS",
@@ -1461,6 +1608,8 @@ async fn scrape_reference_if_url(style_ref: &str, client: &reqwest::Client) -> S
                         token, snippet
                     ));
                 }
+            } else {
+                log_diag("SCRAPE_REDIRECT_REJECTED", &format!("Rejected unsafe or unreachable redirect chain from '{}'.", token));
             }
         }
     }
@@ -1523,6 +1672,7 @@ fn strip_html_tags(input: &str) -> String {
 
 async fn generate_strudel_track(
     model: String,
+    model_hints: recipe_engine::ModelInferenceHints,
     user_prompt: String,
     style_ref: String,
     blueprint_mode: String,
@@ -1546,15 +1696,7 @@ async fn generate_strudel_track(
         .build()
         .unwrap_or_default();
 
-    let scrape_client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(8))
-        .build()
-        .unwrap_or_default();
-
-    let scraped_context = scrape_reference_if_url(&style_ref, &scrape_client).await;
+    let scraped_context = scrape_reference_if_url(&style_ref).await;
 
     // Select once for the full generation request, before retries begin.
     let blueprint_context = match composition_blueprints::select_for_request_with_override(
@@ -1663,9 +1805,11 @@ async fn generate_strudel_track(
         let production_reference =
             strudel_knowledge::format_knowledge_as_reference(&knowledge_entries);
 
-        let compiled_recipe = recipe_engine::compile_generation_recipe(&recipe_engine::RecipeSpec {
+        let compiled_recipe = match recipe_engine::compile_generation_recipe(&recipe_engine::RecipeSpec {
             model: &model,
+            model_hints,
             attempt,
+            evo_gen,
             seed,
             user_prompt: &user_prompt,
             style_ref: &style_ref,
@@ -1681,7 +1825,14 @@ async fn generate_strudel_track(
             last_ast_error: last_ast_error.as_deref(),
             last_failed_candidate: last_failed_candidate.as_deref(),
             error_feedback: &error_feedback,
-        });
+        }) {
+            Ok(recipe) => recipe,
+            Err(error) => {
+                log_diag("RECIPE_COMPILE_FAILED", &error);
+                let _ = tx.send(BotEvent::Error(format!("Generation stopped: {error}"))).await;
+                return;
+            }
+        };
 
         let temp = compiled_recipe.temperature;
         let pass_label = compiled_recipe.pass_mode.label();
@@ -1691,13 +1842,15 @@ async fn generate_strudel_track(
         log_diag(
             "OLLAMA_REQUEST_START",
             &format!(
-                "attempt={}/{} mode={} family={} model='{}' profile={} slices=[{}] trimmed=[{}] est_in_tokens={} num_ctx={} num_predict={} temp={:.2} top_p={:.2} rep_pen={:.2} stops={} system_chars={} prompt_chars={}",
+                "attempt={}/{} work_mode={} pass_mode={} family={} model='{}' profile={} thinking={} slices=[{}] trimmed=[{}] est_in_tokens={} num_ctx={} num_predict={} temp={:.2} top_p={:.2} rep_pen={:.2} stops={} system_chars={} prompt_chars={}",
                 attempt,
                 MAX_GENERATION_ATTEMPTS,
+                compiled_recipe.work_mode.label(),
                 pass_label,
                 compiled_recipe.model_family.label(),
                 model,
                 compiled_recipe.profile_name,
+                compiled_recipe.think,
                 compiled_recipe.active_domains.join(","),
                 compiled_recipe.trimmed_layers.join(","),
                 est_in,
@@ -1717,7 +1870,7 @@ async fn generate_strudel_track(
             prompt: compiled_recipe.user_prompt,
             system: compiled_recipe.system_prompt,
             stream: true,
-            think: false,
+            think: compiled_recipe.think,
             options: OllamaOptions {
                 temperature: temp,
                 top_p: compiled_recipe.top_p,
@@ -1782,6 +1935,7 @@ async fn generate_strudel_track(
                 let mut last_ui_update = Instant::now();
                 let mut eval_count: Option<u64> = None;
                 let mut eval_duration_ns: Option<u64> = None;
+                let mut prompt_eval_count: Option<u64> = None;
 
                 loop {
                     match resp.chunk().await {
@@ -1808,13 +1962,14 @@ async fn generate_strudel_track(
                                             .await;
                                         return;
                                     }
-                                    if let Some(piece) = json_line.get("response").and_then(Value::as_str) {
+                                    if let Some(piece) = ollama_response_piece(&json_line) {
                                         assembled_response.push_str(piece);
                                         chunk_count += 1;
                                     }
                                     if json_line.get("done").and_then(Value::as_bool) == Some(true) {
                                         eval_count = json_line.get("eval_count").and_then(Value::as_u64);
                                         eval_duration_ns = json_line.get("eval_duration").and_then(Value::as_u64);
+                                        prompt_eval_count = json_line.get("prompt_eval_count").and_then(Value::as_u64);
                                     }
                                 }
                             }
@@ -1856,7 +2011,7 @@ async fn generate_strudel_track(
                 let rem = line_buffer.trim();
                 if !rem.is_empty() {
                     if let Ok(json_line) = serde_json::from_str::<Value>(rem) {
-                        if let Some(piece) = json_line.get("response").and_then(Value::as_str) {
+                        if let Some(piece) = ollama_response_piece(&json_line) {
                             assembled_response.push_str(piece);
                         }
                     }
@@ -1870,13 +2025,15 @@ async fn generate_strudel_track(
                 log_diag(
                     "OLLAMA_REQUEST_DONE",
                     &format!(
-                        "attempt={}/{} model='{}' elapsed={:.2}s chunks={} eval_count={:?} tok_per_sec={:.2} chars={}",
+                        "attempt={}/{} model='{}' elapsed={:.2}s chunks={} eval_count={:?} prompt_eval_count={:?} est_input_tokens={} tok_per_sec={:.2} chars={}",
                         attempt,
                         MAX_GENERATION_ATTEMPTS,
                         model,
                         total_elapsed,
                         chunk_count,
                         eval_count,
+                        prompt_eval_count,
+                        est_in,
                         measured_tps,
                         assembled_response.chars().count()
                     ),
@@ -2150,12 +2307,21 @@ async fn main() -> Result<()> {
                     app.available_models = models;
                     app.model_index = preferred_idx;
                     let model = app.current_model();
-                    let profile = resolve_inference_profile(&model, &app.prompt_input, &app.style_reference);
+                    let model_info = app.current_model_info();
+                    let profile = resolve_inference_profile(
+                        &model,
+                        &app.prompt_input,
+                        &app.style_reference,
+                        model_info.inference_hints(),
+                    );
 
                     app.status_message = format!(
-                        "Agent Ready ('{}' [{}]) | Palette: {} [Ctrl+P] | Mode: {} | [Ctrl+T] Golden | [Ctrl+A] MemAdv",
+                        "Agent Ready ('{}' [{} | ctx:{} out:{} think:{}]) | Palette: {} [Ctrl+P] | Mode: {} | [Ctrl+T] Golden | [Ctrl+A] MemAdv",
                         model,
                         profile.profile_name,
+                        profile.num_ctx,
+                        profile.num_predict,
+                        model_info.inference_hints().supports_thinking,
                         app.blueprint_mode_label(),
                         app.mode_badge()
                     );
@@ -2463,6 +2629,7 @@ async fn main() -> Result<()> {
                         app.runtime_studio_opened = false;
 
                         let model = app.current_model();
+                        let model_hints = app.current_model_info().inference_hints();
                         let tx_clone = tx.clone();
                         let prompt = app.prompt_input.clone();
                         let style = app.style_reference.clone();
@@ -2472,7 +2639,9 @@ async fn main() -> Result<()> {
                         let validation_state = shared_runtime_report.clone();
                         let bridge_state = shared_bridge_state.clone();
 
-                        let advisory = app.resolve_empirical_advisory_for_generation(&model);
+                        let advisory = app.resolve_empirical_advisory_for_generation(
+                            &model, &prompt, &style, None, 0,
+                        );
                         let (curated_track_advisory, curated_track_names) =
                             app.resolve_curated_tracks_for_generation(&prompt, &style);
                         app.last_injected_tracks = curated_track_names.clone();
@@ -2490,6 +2659,7 @@ async fn main() -> Result<()> {
                         app.active_generation_task = Some(tokio::spawn(async move {
                             generate_strudel_track(
                                 model,
+                                model_hints,
                                 prompt,
                                 style,
                                 blueprint_mode,
@@ -2521,6 +2691,7 @@ async fn main() -> Result<()> {
 
                                 let evo_gen = app.evolution_count;
                                 let model = app.current_model();
+                                let model_hints = app.current_model_info().inference_hints();
                                 let tx_clone = tx.clone();
                                 let prompt = app.prompt_input.clone();
                                 let style = app.style_reference.clone();
@@ -2536,8 +2707,13 @@ async fn main() -> Result<()> {
                                     Some(app.strudel_code.clone())
                                 };
 
-                                let advisory =
-                                    app.resolve_empirical_advisory_for_generation(&model);
+                                let advisory = app.resolve_empirical_advisory_for_generation(
+                                    &model,
+                                    &prompt,
+                                    &style,
+                                    current.as_deref(),
+                                    evo_gen,
+                                );
                                 let (curated_track_advisory, curated_track_names) =
                                     app.resolve_curated_tracks_for_generation(&prompt, &style);
                                 app.last_injected_tracks = curated_track_names.clone();
@@ -2565,6 +2741,7 @@ async fn main() -> Result<()> {
                                 app.active_generation_task = Some(tokio::spawn(async move {
                                     generate_strudel_track(
                                         model,
+                                        model_hints,
                                         prompt,
                                         style,
                                         blueprint_mode,
@@ -3104,6 +3281,22 @@ fn render_golden_tracks_overlay(f: &mut Frame, app: &App) {
 mod tests {
     use super::*;
 
+    fn tagged_model(name: &str, parameter_size: &str, context_length: u32, thinking: bool) -> ModelInfo {
+        let mut capabilities = vec!["completion".to_string()];
+        if thinking {
+            capabilities.push("thinking".to_string());
+        }
+        ModelInfo {
+            name: name.to_string(),
+            capabilities,
+            details: ModelDetails {
+                parameter_size: Some(parameter_size.to_string()),
+                context_length: None,
+            },
+            context_length: Some(context_length),
+        }
+    }
+
     #[test]
     fn studio_html_never_interpolates_raw_code_or_comment_terminators() {
         let adversarial_code = "setcps(0.5)\n// --> --!> </strudel-editor><script>alert('xss')</script>\ns(\"bd sd\")";
@@ -3116,6 +3309,17 @@ mod tests {
         assert!(html.contains(&b64));
         // Also ensure strudel_ast::validate_strudel_ast accepts the underlying score.
         assert!(strudel_ast::validate_strudel_ast(adversarial_code).is_ok());
+    }
+
+    #[test]
+    fn embedded_studio_uses_the_pinned_strudel_repl_script_url() {
+        let html = build_embedded_studio_html("setcps(0.5)", "c2V0Y3BzKDAuNSk=", "cand-01", "tok-99");
+        assert!(html.contains(&format!("<script src=\"{}\"></script>", STRUDEL_REPL_CDN)));
+        assert_eq!(STRUDEL_REPL_CDN, "https://unpkg.com/@strudel/repl@1.3.0");
+        assert!(!html.contains("[unpkg.com"));
+        assert!(html.contains("waitForReplEditor(22000)"));
+        assert!(html.contains("embedded Strudel REPL did not expose setCode/evaluate"));
+        assert!(html.contains("Static preflight passed, but runtime is unverified."));
     }
 
     #[test]
@@ -3135,36 +3339,107 @@ mod tests {
         assert!(!is_safe_public_scrape_url("http://10.0.0.1/internal"));
         assert!(!is_safe_public_scrape_url("http://172.16.0.5/secret"));
         assert!(!is_safe_public_scrape_url("file:///C:/Windows/System32"));
+        assert!(!is_safe_public_scrape_url("http://[::1]/"));
+        assert!(!is_safe_public_scrape_url("http://[fd00::1]/"));
+        assert!(!is_safe_public_scrape_url("http://[2001:db8::1]/"));
+        assert!(!is_safe_public_scrape_url("http://[::ffff:127.0.0.1]/"));
+        assert!(!is_safe_public_scrape_url("https://user:pass@strudel.cc/"));
         assert!(is_safe_public_scrape_url("https://strudel.cc/learn/effects/"));
+        assert!(is_safe_public_scrape_url("https://[2606:4700:4700::1111]/"));
     }
 
     #[test]
-    fn preferred_model_selector_favors_interactive_14b_coder_over_32b_spill() {
+    fn redirect_targets_are_revalidated_before_following() {
+        let public = reqwest::Url::parse("https://strudel.cc/path/start").unwrap();
+        let normal = resolve_safe_redirect(&public, "../learn").unwrap();
+        assert_eq!(normal.as_str(), "https://strudel.cc/learn");
+        assert!(resolve_safe_redirect(&public, "http://127.0.0.1/admin").is_err());
+        assert!(resolve_safe_redirect(&public, "http://192.168.1.1/admin").is_err());
+        assert!(resolve_safe_redirect(&public, "http://[::1]/admin").is_err());
+    }
+
+    #[test]
+    fn preferred_model_selector_favors_14b_coder_and_skips_embedding_models() {
         let models = vec![
-            "qwen2.5-coder:32b".to_string(),
-            "qwen2.5-coder:14b".to_string(),
-            "mistral:7b".to_string(),
+            ModelInfo {
+                name: "nomic-embed-text:latest".to_string(),
+                capabilities: vec!["embedding".into()],
+                ..ModelInfo::default()
+            },
+            tagged_model("qwen2.5-coder:32b", "32B", 131_072, false),
+            tagged_model("qwen2.5-coder:14b", "14B", 32_768, false),
+            tagged_model("mistral:7b", "7B", 32_768, false),
         ];
-        assert_eq!(select_preferred_model_index(&models, None), 1);
+        assert_eq!(select_preferred_model_index(&models, None), 2);
         assert_eq!(
             select_preferred_model_index(&models, Some("qwen2.5-coder:32b")),
-            0
+            1
         );
+        assert_ne!(select_preferred_model_index(&models, Some("nomic-embed-text:latest")), 0);
     }
 
     #[test]
     fn inference_profile_matches_model_class_and_prompt_scale() {
-        let fast = resolve_inference_profile("qwen2.5-coder:14b", "Make a dark acid loop", "");
+        let fast = resolve_inference_profile("qwen2.5-coder:14b", "Make a dark acid loop", "", tagged_model("qwen2.5-coder:14b", "14B", 32_768, false).inference_hints());
         assert_eq!(fast.num_ctx, 32_768);
         assert_eq!(fast.num_predict, 4_096);
 
-        let heavy = resolve_inference_profile("qwen2.5-coder:32b", "Make a dark acid loop", "");
+        let heavy = resolve_inference_profile("qwen2.5-coder:32b", "Make a dark acid loop", "", tagged_model("qwen2.5-coder:32b", "32B", 131_072, false).inference_hints());
         assert_eq!(heavy.num_ctx, 16_384);
         assert_eq!(heavy.num_predict, 4_096);
 
-        let concert = resolve_inference_profile("qwen2.5-coder:14b", "Write a full live set concert", "");
+        let concert = resolve_inference_profile("qwen2.5-coder:14b", "Write a full live set concert", "", tagged_model("qwen2.5-coder:14b", "14B", 32_768, false).inference_hints());
         assert_eq!(concert.num_ctx, 32_768);
         assert_eq!(concert.num_predict, 8_192);
+    }
+
+    #[test]
+    fn installed_model_metadata_drives_size_and_thinking_policy() {
+        let installed = [
+            tagged_model("nemotron-3.5-bolt:latest", "74B", 262_144, true),
+            tagged_model("bonsai-2:27b", "27B", 262_144, true),
+            tagged_model("glm-4.7-flash:latest", "29.9B", 202_752, true),
+            tagged_model("qwen3.8:27b", "27.3B", 262_144, true),
+            tagged_model("deepseek-r1:14b", "14B", 131_072, true),
+            tagged_model("qwen2.5:7b", "7B", 32_768, false),
+        ];
+        assert!(installed.iter().all(ModelInfo::supports_generation));
+        assert!(installed[0].inference_hints().parameter_size_billions.unwrap() >= 70.0);
+        assert!(installed[2].inference_hints().supports_thinking);
+        assert_eq!(recipe_engine::ModelFamily::from_model_name(&installed[5].name), recipe_engine::ModelFamily::QwenGeneral);
+        assert_eq!(recipe_engine::ModelFamily::from_model_name("qwen2.5-coder:7b"), recipe_engine::ModelFamily::QwenCoder);
+        let embedding = ModelInfo {
+            name: "mxbai-embed-large:latest".to_string(),
+            capabilities: vec!["embedding".into()],
+            ..ModelInfo::default()
+        };
+        assert!(!embedding.supports_generation());
+    }
+
+    #[test]
+    fn ollama_thinking_request_and_response_keep_reasoning_out_of_code() {
+        let request = OllamaRequest {
+            model: "deepseek-r1:14b".into(),
+            prompt: "repair this score".into(),
+            system: "return code".into(),
+            stream: true,
+            think: true,
+            options: OllamaOptions {
+                temperature: 0.24,
+                top_p: 0.85,
+                repeat_penalty: 1.02,
+                num_ctx: 16_384,
+                num_predict: 2_048,
+                seed: 7,
+                stop: Vec::new(),
+            },
+        };
+        let serialized = serde_json::to_value(request).unwrap();
+        assert_eq!(serialized.get("think").and_then(Value::as_bool), Some(true));
+
+        let chunk = serde_json::json!({"thinking":"do not include this", "response":"setcps(0.5)"});
+        assert_eq!(ollama_response_piece(&chunk), Some("setcps(0.5)"));
+        assert!(!ollama_response_piece(&chunk).unwrap().contains("do not include this"));
     }
 
     #[test]
