@@ -6,6 +6,9 @@ mod orchestrator;
 mod composition_blueprints;
 mod strudel_ast;
 mod recipe_engine;
+mod engram_planner;
+
+use engram_planner::EngramPlanner;
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -40,7 +43,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-const APP_VERSION: &str = "7.1.0";
+const APP_VERSION: &str = "7.2.0";
 const LOOPBACK_IP: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 7777;
 const OLLAMA_PORT: u16 = 11434;
@@ -769,20 +772,22 @@ impl App {
         model: &str,
         prompt: &str,
         style: &str,
-        existing_code: Option<&str>,
-        evo_gen: u32,
+        model_context_length: Option<u32>,
     ) -> String {
         if !self.use_empirical_advisory {
             return String::new();
         }
-        let work_mode = orchestrator::classify_work_mode(prompt, existing_code, evo_gen);
-        let task_context = format!(
-            "musical request: {prompt}\nstyle: {style}\nwork mode: {}\nexisting score: {}",
-            work_mode.label(),
-            existing_code.unwrap_or("")
+        // Query only the user's current direction. The full existing score is
+        // already supplied elsewhere in the recipe and would skew lexical retrieval.
+        let task_context = format!("{prompt}\n{style}");
+        let plan = EngramPlanner::default().plan(
+            &self.intelligence.store,
+            model,
+            &task_context,
+            model_context_length,
         );
-        self.intelligence
-            .build_experience_advisory_for_task(Some(model), &task_context)
+        log_diag("ENGRAM_MEMORY_PLAN", &plan.diagnostic_summary());
+        plan.advisory
     }
 
     fn blueprint_mode_label(&self) -> String {
@@ -2022,10 +2027,12 @@ async fn generate_strudel_track(
                     (Some(tokens), Some(ns)) if ns > 0 => (tokens as f64) / ((ns as f64) / 1_000_000_000.0),
                     _ => (chunk_count as f64) / (total_elapsed.max(0.1) as f64),
                 };
+                let actual_to_estimated_prompt_ratio = prompt_eval_count
+                    .map(|actual| actual as f64 / est_in.max(1) as f64);
                 log_diag(
                     "OLLAMA_REQUEST_DONE",
                     &format!(
-                        "attempt={}/{} model='{}' elapsed={:.2}s chunks={} eval_count={:?} prompt_eval_count={:?} est_input_tokens={} tok_per_sec={:.2} chars={}",
+                        "attempt={}/{} model='{}' elapsed={:.2}s chunks={} eval_count={:?} prompt_eval_count={:?} est_input_tokens={} actual_to_estimated_prompt_ratio={:?} tok_per_sec={:.2} chars={}",
                         attempt,
                         MAX_GENERATION_ATTEMPTS,
                         model,
@@ -2034,6 +2041,7 @@ async fn generate_strudel_track(
                         eval_count,
                         prompt_eval_count,
                         est_in,
+                        actual_to_estimated_prompt_ratio,
                         measured_tps,
                         assembled_response.chars().count()
                     ),
@@ -2640,7 +2648,10 @@ async fn main() -> Result<()> {
                         let bridge_state = shared_bridge_state.clone();
 
                         let advisory = app.resolve_empirical_advisory_for_generation(
-                            &model, &prompt, &style, None, 0,
+                            &model,
+                            &prompt,
+                            &style,
+                            model_hints.context_length,
                         );
                         let (curated_track_advisory, curated_track_names) =
                             app.resolve_curated_tracks_for_generation(&prompt, &style);
@@ -2711,8 +2722,7 @@ async fn main() -> Result<()> {
                                     &model,
                                     &prompt,
                                     &style,
-                                    current.as_deref(),
-                                    evo_gen,
+                                    model_hints.context_length,
                                 );
                                 let (curated_track_advisory, curated_track_names) =
                                     app.resolve_curated_tracks_for_generation(&prompt, &style);
