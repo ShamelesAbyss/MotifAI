@@ -7,8 +7,10 @@ mod composition_blueprints;
 mod strudel_ast;
 mod recipe_engine;
 mod engram_planner;
+mod memory_review;
 
 use engram_planner::EngramPlanner;
+use memory_review::MemoryReview;
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -43,7 +45,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-const APP_VERSION: &str = "7.2.0";
+const APP_VERSION: &str = "7.3.0";
 const LOOPBACK_IP: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 7777;
 const OLLAMA_PORT: u16 = 11434;
@@ -333,7 +335,25 @@ enum BotEvent {
         attempt: usize,
         open_studio: bool,
     },
-    Generated(String, ExternalAstAnalysis, Option<String>, Vec<String>),
+    Generated(
+        String,
+        ExternalAstAnalysis,
+        Option<String>,
+        Vec<String>,
+        String,
+    ),
+    MemoryAdvisoryDelivery {
+        enabled: bool,
+        selected_count: usize,
+        relevant_count: usize,
+        trimmed: bool,
+    },
+    GenerationFailed {
+        model: String,
+        message: String,
+        candidate: String,
+        runtime_failure: String,
+    },
     Error(String),
 }
 
@@ -354,6 +374,8 @@ struct App {
     history_cursor: usize,
     intelligence: SonicIntelligence,
     active_experiment_id: Option<String>,
+    active_experiment_ratable: bool,
+    memory_review: MemoryReview,
     use_golden_tracks: bool,
     use_empirical_advisory: bool,
     golden_tracks_open: bool,
@@ -423,7 +445,7 @@ impl App {
             )
         } else {
             format!(
-                "MASTER PALETTE: {} [Ctrl+P] | Golden Tracks OFF [Ctrl+T] | Scorebook [Ctrl+B] | MemAdv OFF [Ctrl+A] | Compose [Ctrl+G/F5]",
+                "MASTER PALETTE: {} [Ctrl+P] | Golden Tracks OFF [Ctrl+T] | Scorebook [Ctrl+B] | MemAdv OFF [Ctrl+A] | Memory Review [Ctrl+K] | Compose [Ctrl+G/F5]",
                 initial_blueprint_label
             )
         };
@@ -448,6 +470,8 @@ impl App {
             history_cursor: 0,
             intelligence,
             active_experiment_id: None,
+            active_experiment_ratable: false,
+            memory_review: MemoryReview::default(),
             use_golden_tracks: false,
             use_empirical_advisory: false,
             golden_tracks_open: false,
@@ -496,6 +520,7 @@ impl App {
         if let Some(snapshot) = self.score_history.get(self.history_cursor).cloned() {
             self.strudel_code = snapshot.code.clone();
             self.evolution_count = snapshot.evolution_count;
+            self.active_experiment_ratable = snapshot.experiment_id.is_some();
             self.active_experiment_id = snapshot.experiment_id;
             self.scroll_offset = 0;
             if let Ok(mut guard) = self.shared_code.try_write() {
@@ -519,6 +544,7 @@ impl App {
         if let Some(snapshot) = self.score_history.get(self.history_cursor).cloned() {
             self.strudel_code = snapshot.code.clone();
             self.evolution_count = snapshot.evolution_count;
+            self.active_experiment_ratable = snapshot.experiment_id.is_some();
             self.active_experiment_id = snapshot.experiment_id;
             self.scroll_offset = 0;
             if let Ok(mut guard) = self.shared_code.try_write() {
@@ -768,15 +794,12 @@ impl App {
     }
 
     fn resolve_empirical_advisory_for_generation(
-        &self,
+        &mut self,
         model: &str,
         prompt: &str,
         style: &str,
         model_context_length: Option<u32>,
-    ) -> String {
-        if !self.use_empirical_advisory {
-            return String::new();
-        }
+    ) -> (String, usize, usize) {
         // Query only the user's current direction. The full existing score is
         // already supplied elsewhere in the recipe and would skew lexical retrieval.
         let task_context = format!("{prompt}\n{style}");
@@ -787,7 +810,122 @@ impl App {
             model_context_length,
         );
         log_diag("ENGRAM_MEMORY_PLAN", &plan.diagnostic_summary());
-        plan.advisory
+        let selected_count = plan.selected.len();
+        let relevant_count = plan.relevant_candidates;
+        let advisory = if self.use_empirical_advisory {
+            plan.advisory.clone()
+        } else {
+            String::new()
+        };
+        self.memory_review
+            .record_plan(plan, self.use_empirical_advisory);
+        (advisory, selected_count, relevant_count)
+    }
+
+    fn apply_memory_finding_feedback(&mut self, signal: OutcomeSignal) {
+        let Some(experiment_id) = self.active_experiment_id.clone() else {
+            self.status_message =
+                "Generate a composition before recording finding-specific memory feedback."
+                    .to_string();
+            return;
+        };
+        let Some(finding_id) = self
+            .memory_review
+            .selected_finding_id(&self.intelligence, Some(&experiment_id))
+        else {
+            self.status_message =
+                "The active experiment has no rateable musical or experiential finding.".to_string();
+            return;
+        };
+
+        let detail = match signal {
+            OutcomeSignal::PositiveEndorsement => {
+                "User explicitly marked this finding as helpful."
+            }
+            OutcomeSignal::RevisionRequested => {
+                "User explicitly marked this finding as needing revision."
+            }
+            _ => "User provided finding-specific feedback.",
+        };
+        match self.intelligence.apply_finding_feedback(
+            &experiment_id,
+            &finding_id,
+            signal,
+            Some(detail),
+        ) {
+            Ok(true) => {
+                let label = if signal == OutcomeSignal::PositiveEndorsement {
+                    "helpful"
+                } else {
+                    "needs revision"
+                };
+                self.status_message = format!(
+                    "Recorded finding-specific feedback ({label}) for {}.",
+                    finding_id
+                );
+            }
+            Ok(false) => {
+                self.status_message =
+                    "That finding already has this feedback for the active experiment.".to_string();
+            }
+            Err(error) => {
+                self.status_message = format!("Could not record finding feedback: {error}");
+            }
+        }
+    }
+
+    fn record_runtime_failure(
+        &mut self,
+        candidate: &str,
+        runtime_failure: &str,
+        model_name: &str,
+    ) -> Result<String, String> {
+        let compact_detail: String = runtime_failure
+            .lines()
+            .next()
+            .unwrap_or("Strudel runtime evaluation failed")
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(220)
+            .collect();
+        let statement = format!("Embedded Strudel runtime evaluation failed: {compact_detail}");
+        let mut report = self.intelligence.perform_autopsy(candidate, None, None);
+        report
+            .knowledge_candidates
+            .push(sonic_intelligence::KnowledgeCandidate {
+                category: sonic_intelligence::MemoryCategory::Technical,
+                statement,
+                source_finding: "runtime:diagnostic:evaluation_failure".to_string(),
+                confidence: 0.95,
+            });
+
+        let experiment_id = self
+            .intelligence
+            .record_experiment_from_autopsy(report, model_name.to_string())?;
+        self.active_experiment_id = Some(experiment_id.clone());
+        self.active_experiment_ratable = false;
+        let _ = self.intelligence.apply_outcome_feedback(
+            &experiment_id,
+            OutcomeSignal::TechnicalFailure,
+            Some("Generation exhausted its repair budget on an embedded runtime failure."),
+        );
+
+        let finding_ids: Vec<String> = self
+            .intelligence
+            .knowledge_entries_for_experiment(&experiment_id)
+            .into_iter()
+            .filter(|entry| entry.source_finding.starts_with("runtime:diagnostic:"))
+            .map(|entry| entry.id.clone())
+            .collect();
+        for finding_id in finding_ids {
+            self.intelligence.apply_finding_feedback(
+                &experiment_id,
+                &finding_id,
+                OutcomeSignal::TechnicalFailure,
+                Some(&compact_detail),
+            )?;
+        }
+        Ok(experiment_id)
     }
 
     fn blueprint_mode_label(&self) -> String {
@@ -1684,6 +1822,8 @@ async fn generate_strudel_track(
     existing_code: Option<String>,
     evo_gen: u32,
     empirical_advisory: String,
+    memory_selected_count: usize,
+    memory_relevant_count: usize,
     curated_track_advisory: String,
     curated_track_names: Vec<String>,
     shared_code: Arc<RwLock<String>>,
@@ -1771,6 +1911,7 @@ async fn generate_strudel_track(
     }
     let mut last_ast_error: Option<String> = None;
     let mut last_failed_candidate: Option<String> = None;
+    let mut last_runtime_failure: Option<String> = None;
     let mut last_warnings = Vec::new();
     let mut previous_candidates: Vec<String> = Vec::new();
     let mut runtime_check_started = false;
@@ -1843,6 +1984,17 @@ async fn generate_strudel_track(
         let pass_label = compiled_recipe.pass_mode.label();
         let est_in = compiled_recipe.estimated_input_tokens;
         let slice_count = compiled_recipe.active_domains.len();
+        let memory_trimmed = compiled_recipe
+            .trimmed_layers
+            .contains(&"empirical-memory");
+        let _ = tx
+            .send(BotEvent::MemoryAdvisoryDelivery {
+                enabled: !empirical_advisory.is_empty(),
+                selected_count: memory_selected_count,
+                relevant_count: memory_relevant_count,
+                trimmed: memory_trimmed,
+            })
+            .await;
 
         log_diag(
             "OLLAMA_REQUEST_START",
@@ -2055,6 +2207,7 @@ async fn generate_strudel_track(
                         ) {
                             log_diag("CLONE_REJECTED", &clone_warn);
                             last_failed_candidate = Some(healed_code);
+                            last_runtime_failure = None;
                             last_warnings.push(clone_warn.clone());
                             last_ast_error = Some(clone_warn);
                             continue;
@@ -2067,6 +2220,7 @@ async fn generate_strudel_track(
                             let duplicate = "DUPLICATE RETRY CANDIDATE: the model repeated a previously rejected score verbatim. Make a technical correction to the reported defect instead of returning the same source again.".to_string();
                             log_diag("DUPLICATE_RETRY_REJECTED", &duplicate);
                             last_failed_candidate = Some(healed_code);
+                            last_runtime_failure = None;
                             last_warnings.push(duplicate.clone());
                             last_ast_error = Some(duplicate);
                             continue;
@@ -2108,6 +2262,7 @@ async fn generate_strudel_track(
                                     ast_analysis,
                                     existing_code,
                                     curated_track_names.clone(),
+                                    model.clone(),
                                 ))
                                 .await;
                             return;
@@ -2172,6 +2327,7 @@ async fn generate_strudel_track(
                                         ast_analysis,
                                         existing_code,
                                         curated_track_names.clone(),
+                                        model.clone(),
                                     ))
                                     .await;
                                 return;
@@ -2183,6 +2339,7 @@ async fn generate_strudel_track(
                                 );
                                 log_diag("STRudel_RUNTIME_RETRY", &runtime_error);
                                 last_failed_candidate = Some(healed_code);
+                                last_runtime_failure = Some(report.detail.clone());
                                 last_warnings.push(runtime_error.clone());
                                 last_ast_error = Some(runtime_error);
                                 continue;
@@ -2204,6 +2361,7 @@ async fn generate_strudel_track(
                                         ast_analysis,
                                         existing_code,
                                         curated_track_names.clone(),
+                                        model.clone(),
                                     ))
                                     .await;
                                 return;
@@ -2222,6 +2380,7 @@ async fn generate_strudel_track(
                                         ast_analysis,
                                         existing_code,
                                         curated_track_names.clone(),
+                                        model.clone(),
                                     ))
                                     .await;
                                 return;
@@ -2234,6 +2393,7 @@ async fn generate_strudel_track(
                         if !raw_trimmed.is_empty() {
                             last_failed_candidate = Some(raw_trimmed.to_string());
                         }
+                        last_runtime_failure = None;
                         last_warnings.push(ast_err.clone());
                         last_ast_error = Some(ast_err);
                     }
@@ -2256,11 +2416,21 @@ async fn generate_strudel_track(
         }
     }
 
-    let _ = tx
-        .send(BotEvent::Error(last_ast_error.unwrap_or_else(|| {
-            "Generation rejected by clone/stagnation detector.".to_string()
-        })))
-        .await;
+    let message = last_ast_error
+        .unwrap_or_else(|| "Generation rejected by clone/stagnation detector.".to_string());
+    if let (Some(candidate), Some(runtime_failure)) = (last_failed_candidate, last_runtime_failure) {
+        let candidate: String = candidate.chars().take(MAX_REPAIR_CANDIDATE_CHARS).collect();
+        let _ = tx
+            .send(BotEvent::GenerationFailed {
+                model: model.clone(),
+                message,
+                candidate,
+                runtime_failure,
+            })
+            .await;
+    } else {
+        let _ = tx.send(BotEvent::Error(message)).await;
+    }
 }
 
 #[tokio::main]
@@ -2324,7 +2494,7 @@ async fn main() -> Result<()> {
                     );
 
                     app.status_message = format!(
-                        "Agent Ready ('{}' [{} | ctx:{} out:{} think:{}]) | Palette: {} [Ctrl+P] | Mode: {} | [Ctrl+T] Golden | [Ctrl+A] MemAdv",
+                        "Agent Ready ('{}' [{} | ctx:{} out:{} think:{}]) | Palette: {} [Ctrl+P] | Mode: {} | [Ctrl+T] Golden | [Ctrl+A] MemAdv | [Ctrl+K] Memory",
                         model,
                         profile.profile_name,
                         profile.num_ctx,
@@ -2356,7 +2526,7 @@ async fn main() -> Result<()> {
                         app.runtime_studio_opened = true;
                     }
                 }
-                BotEvent::Generated(code, ast_analysis, prev_code, injected_tracks) => {
+                BotEvent::Generated(code, ast_analysis, prev_code, injected_tracks, model) => {
                     app.strudel_code = code.clone();
 
                     if let Ok(mut guard) = app.shared_code.try_write() {
@@ -2367,6 +2537,8 @@ async fn main() -> Result<()> {
                     app.active_generation_task = None;
                     app.scroll_offset = 0;
                     app.last_injected_tracks = injected_tracks.clone();
+                    app.active_experiment_id = None;
+                    app.active_experiment_ratable = false;
 
                     let compiled_cleanly = ast_analysis.ast_compiled_cleanly;
                     let runtime_unverified = ast_analysis
@@ -2382,7 +2554,7 @@ async fn main() -> Result<()> {
 
                     match app
                         .intelligence
-                        .record_experiment_from_autopsy(autopsy_report, app.current_model())
+                        .record_experiment_from_autopsy(autopsy_report, model)
                     {
                         Ok(exp_id) => {
                             if compiled_cleanly {
@@ -2404,6 +2576,7 @@ async fn main() -> Result<()> {
                             );
 
                             app.active_experiment_id = Some(exp_id);
+                            app.active_experiment_ratable = true;
                         }
                         Err(err) => {
                             log_diag("SONIC_INTELLIGENCE_ERR", &err);
@@ -2443,6 +2616,49 @@ async fn main() -> Result<()> {
                             reference_status
                         )
                     };
+                }
+                BotEvent::MemoryAdvisoryDelivery {
+                    enabled,
+                    selected_count,
+                    relevant_count,
+                    trimmed,
+                } => {
+                    app.memory_review.record_delivery(
+                        enabled,
+                        selected_count,
+                        relevant_count,
+                        trimmed,
+                    );
+                }
+                BotEvent::GenerationFailed {
+                    model,
+                    message,
+                    candidate,
+                    runtime_failure,
+                } => {
+                    app.is_generating = false;
+                    app.active_generation_task = None;
+                    app.strudel_code = candidate.clone();
+                    app.active_experiment_id = None;
+                    app.active_experiment_ratable = false;
+                    if let Ok(mut guard) = app.shared_code.try_write() {
+                        *guard = candidate.clone();
+                    }
+                    match app.record_runtime_failure(&candidate, &runtime_failure, &model) {
+                        Ok(experiment_id) => {
+                            app.status_message = format!(
+                                "{} | Runtime failure recorded as {}. Press Ctrl+K to review memory.",
+                                message, experiment_id
+                            );
+                        }
+                        Err(error) => {
+                            app.status_message = format!(
+                                "{} | Could not persist runtime failure: {}",
+                                message, error
+                            );
+                        }
+                    }
+                    log_diag("GENERATION_FAILED", &app.status_message);
                 }
                 BotEvent::Error(err) => {
                     app.is_generating = false;
@@ -2554,6 +2770,44 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                if app.memory_review.is_open() {
+                    if key.code == KeyCode::Esc
+                        || (key.modifiers.contains(KeyModifiers::CONTROL)
+                            && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K')))
+                    {
+                        app.memory_review.close();
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+                    {
+                        app.toggle_empirical_advisory();
+                    } else {
+                        match key.code {
+                            KeyCode::Up => app.memory_review.move_cursor(
+                                -1,
+                                &app.intelligence,
+                                app.active_experiment_id.as_deref(),
+                            ),
+                            KeyCode::Down => app.memory_review.move_cursor(
+                                1,
+                                &app.intelligence,
+                                app.active_experiment_id.as_deref(),
+                            ),
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                app.apply_memory_finding_feedback(
+                                    OutcomeSignal::PositiveEndorsement,
+                                );
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                app.apply_memory_finding_feedback(
+                                    OutcomeSignal::RevisionRequested,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+
                 if key.code == KeyCode::Esc {
                     if app.cancel_active_generation() {
                         continue;
@@ -2607,6 +2861,13 @@ async fn main() -> Result<()> {
                 }
 
                 if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K'))
+                {
+                    app.memory_review.open();
+                    continue;
+                }
+
+                if key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
                 {
                     app.refresh_golden_track_inventory();
@@ -2647,12 +2908,13 @@ async fn main() -> Result<()> {
                         let validation_state = shared_runtime_report.clone();
                         let bridge_state = shared_bridge_state.clone();
 
-                        let advisory = app.resolve_empirical_advisory_for_generation(
-                            &model,
-                            &prompt,
-                            &style,
-                            model_hints.context_length,
-                        );
+                        let (advisory, memory_selected_count, memory_relevant_count) =
+                            app.resolve_empirical_advisory_for_generation(
+                                &model,
+                                &prompt,
+                                &style,
+                                model_hints.context_length,
+                            );
                         let (curated_track_advisory, curated_track_names) =
                             app.resolve_curated_tracks_for_generation(&prompt, &style);
                         app.last_injected_tracks = curated_track_names.clone();
@@ -2677,6 +2939,8 @@ async fn main() -> Result<()> {
                                 None,
                                 0,
                                 advisory,
+                                memory_selected_count,
+                                memory_relevant_count,
                                 curated_track_advisory,
                                 curated_track_names,
                                 code_state,
@@ -2718,12 +2982,13 @@ async fn main() -> Result<()> {
                                     Some(app.strudel_code.clone())
                                 };
 
-                                let advisory = app.resolve_empirical_advisory_for_generation(
-                                    &model,
-                                    &prompt,
-                                    &style,
-                                    model_hints.context_length,
-                                );
+                                let (advisory, memory_selected_count, memory_relevant_count) =
+                                    app.resolve_empirical_advisory_for_generation(
+                                        &model,
+                                        &prompt,
+                                        &style,
+                                        model_hints.context_length,
+                                    );
                                 let (curated_track_advisory, curated_track_names) =
                                     app.resolve_curated_tracks_for_generation(&prompt, &style);
                                 app.last_injected_tracks = curated_track_names.clone();
@@ -2758,6 +3023,8 @@ async fn main() -> Result<()> {
                                         current,
                                         evo_gen,
                                         advisory,
+                                        memory_selected_count,
+                                        memory_relevant_count,
                                         curated_track_advisory,
                                         curated_track_names,
                                         code_state,
@@ -2814,6 +3081,11 @@ async fn main() -> Result<()> {
                             continue;
                         }
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            if !app.active_experiment_ratable {
+                                app.status_message =
+                                    "Only a successfully generated composition can receive a whole-track approval. Use Ctrl+K for finding feedback.".to_string();
+                                continue;
+                            }
                             match app.active_experiment_id.clone() {
                                 Some(exp_id) => {
                                     match app.intelligence.apply_outcome_feedback(
@@ -2847,6 +3119,11 @@ async fn main() -> Result<()> {
                             continue;
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') => {
+                            if !app.active_experiment_ratable {
+                                app.status_message =
+                                    "Only a successfully generated composition can receive a whole-track revision rating. Use Ctrl+K for finding feedback.".to_string();
+                                continue;
+                            }
                             match app.active_experiment_id.clone() {
                                 Some(exp_id) => {
                                     match app.intelligence.apply_outcome_feedback(
@@ -3120,7 +3397,7 @@ fn ui(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_style(code_border)
                 .title(
-                    " [3] Autonomous Agentic Strudel Score (Up/Down: Scroll | Left/Right: Tempo | Ctrl+Z/U: Undo/Redo | Ctrl+S: Save | Ctrl+Y/N: Rate) ",
+                    " [3] Autonomous Agentic Strudel Score (Up/Down: Scroll | Left/Right: Tempo | Ctrl+Z/U: Undo/Redo | Ctrl+S: Save | Ctrl+Y/N: Rate | Ctrl+K: Memory) ",
                 ),
         );
 
@@ -3137,6 +3414,15 @@ fn ui(f: &mut Frame, app: &App) {
     }
     if app.blueprint_picker_open {
         render_blueprint_picker_overlay(f, app);
+    }
+    if app.memory_review.is_open() {
+        memory_review::render_overlay(
+            f,
+            &app.memory_review,
+            &app.intelligence,
+            app.active_experiment_id.as_deref(),
+            app.use_empirical_advisory,
+        );
     }
 }
 

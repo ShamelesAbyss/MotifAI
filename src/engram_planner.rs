@@ -262,7 +262,8 @@ fn advisory_eligible(entry: &KnowledgeEntry) -> bool {
             .unwrap_or(false);
     let confirmed_technical_failure = !entry.heuristic_only
         && entry.category == MemoryCategory::Technical
-        && source.starts_with("ast:diagnostic:")
+        && (source.starts_with("ast:diagnostic:")
+            || source.starts_with("runtime:diagnostic:"))
         && entry.evidence.technical_failures >= 2;
 
     repeated_finding_preference || confirmed_technical_failure
@@ -472,6 +473,38 @@ mod tests {
         assert!(plan.advisory.contains("Avoid unsupported filter methods"));
         assert!(!plan.advisory.contains("piano displays"));
         assert!(!plan.advisory.contains("tentative"));
+    }
+
+    #[test]
+    fn repeated_embedded_runtime_failures_are_retrievable() {
+        let mut store = MotifMemoryStore::default();
+        let mut repeated = technical_failure(
+            "runtime-repeated",
+            "Embedded Strudel runtime evaluation failed: unsupported bass filter.",
+            2,
+        );
+        repeated.source_finding = "runtime:diagnostic:evaluation_failure".to_string();
+        store.knowledge.push(repeated);
+
+        let mut single = technical_failure(
+            "runtime-single",
+            "Embedded Strudel runtime evaluation failed: unsupported delay.",
+            1,
+        );
+        single.source_finding = "runtime:diagnostic:evaluation_failure".to_string();
+        store.knowledge.push(single);
+
+        let plan = EngramPlanner::default().plan(
+            &store,
+            "qwen2.5-coder:14b",
+            "Fix the embedded Strudel runtime bass filter failure",
+            Some(32_768),
+        );
+
+        assert_eq!(plan.eligible_candidates, 1);
+        assert_eq!(plan.selected.len(), 1);
+        assert_eq!(plan.selected[0].id, "runtime-repeated");
+        assert!(!plan.advisory.contains("runtime-single"));
     }
 
     #[test]

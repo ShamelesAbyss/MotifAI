@@ -1117,10 +1117,11 @@ impl SonicIntelligence {
             {
                 let existing = &mut self.store.knowledge[existing_index];
                 if existing.source_finding.is_empty()
-                    || (existing.heuristic_only && candidate.source_finding.starts_with("ast:"))
+                    || (existing.heuristic_only
+                        && is_trusted_finding_source(&candidate.source_finding))
                 {
                     existing.source_finding = candidate.source_finding.clone();
-                    existing.heuristic_only = !candidate.source_finding.starts_with("ast:");
+                    existing.heuristic_only = !is_trusted_finding_source(&candidate.source_finding);
                 }
                 if !existing
                     .source_experiment_ids
@@ -1145,7 +1146,7 @@ impl SonicIntelligence {
                 status: EpistemicStatus::TentativeHypothesis,
                 confidence: clamp_unit(
                     candidate.confidence
-                        * if candidate.source_finding.starts_with("ast:") {
+                        * if is_trusted_finding_source(&candidate.source_finding) {
                             1.0
                         } else {
                             0.7
@@ -1155,7 +1156,7 @@ impl SonicIntelligence {
                 updated_at_ms: unix_millis(),
                 source_experiment_ids: vec![experiment_id.clone()],
                 evidence: EvidenceLedger::default(),
-                heuristic_only: !candidate.source_finding.starts_with("ast:"),
+                heuristic_only: !is_trusted_finding_source(&candidate.source_finding),
             });
         }
 
@@ -1559,10 +1560,15 @@ fn advisory_eligible(entry: &KnowledgeEntry) -> bool {
             .unwrap_or(false);
     let confirmed_technical_failure = !entry.heuristic_only
         && entry.category == MemoryCategory::Technical
-        && source.starts_with("ast:diagnostic:")
+        && (source.starts_with("ast:diagnostic:")
+            || source.starts_with("runtime:diagnostic:"))
         && entry.evidence.technical_failures >= 2;
 
     repeated_finding_preference || confirmed_technical_failure
+}
+
+fn is_trusted_finding_source(source: &str) -> bool {
+    source.starts_with("ast:") || source.starts_with("runtime:")
 }
 
 fn advisory_relevance(entry: &KnowledgeEntry, task_context: &str) -> usize {
@@ -2323,7 +2329,11 @@ mod tests {
     }
 
     fn temp_file(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
+        let test_temp_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-temp");
+        fs::create_dir_all(&test_temp_dir).unwrap();
+        test_temp_dir.join(format!(
             "motif-ai-{label}-{}-{}.json",
             std::process::id(),
             unix_nanos()
@@ -2491,6 +2501,64 @@ mod tests {
                 .technical_successes;
             assert_eq!(count, 1);
         }
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repeated_runtime_failures_flow_into_engram_retrieval() {
+        let path = temp_file("runtime-memory-loop");
+        let mut engine = SonicIntelligence::load_or_init_at(&path);
+
+        for _ in 0..2 {
+            let mut report = engine.perform_autopsy(
+                "setcps(0.5)\nconst bass = note(\"c2\").s(\"sawtooth\")",
+                None,
+                None,
+            );
+            report.knowledge_candidates.push(KnowledgeCandidate {
+                category: MemoryCategory::Technical,
+                statement:
+                    "Embedded Strudel runtime evaluation failed: unsupported bass filter API."
+                        .into(),
+                source_finding: "runtime:diagnostic:evaluation_failure".into(),
+                confidence: 0.95,
+            });
+            let experiment_id = engine
+                .record_experiment_from_autopsy(report, "test-model")
+                .unwrap();
+            let finding_id = engine
+                .knowledge_entries_for_experiment(&experiment_id)
+                .into_iter()
+                .find(|entry| entry.source_finding == "runtime:diagnostic:evaluation_failure")
+                .unwrap()
+                .id
+                .clone();
+            engine
+                .apply_outcome_feedback(
+                    &experiment_id,
+                    OutcomeSignal::TechnicalFailure,
+                    Some("Embedded evaluator rejected the generated score."),
+                )
+                .unwrap();
+            engine
+                .apply_finding_feedback(
+                    &experiment_id,
+                    &finding_id,
+                    OutcomeSignal::TechnicalFailure,
+                    Some("unsupported bass filter API"),
+                )
+                .unwrap();
+        }
+
+        let plan = crate::engram_planner::EngramPlanner::default().plan(
+            &engine.store,
+            "test-model",
+            "Create a score with bass filter synthesis",
+            Some(32_768),
+        );
+        assert_eq!(plan.selected.len(), 1);
+        assert!(plan.advisory.contains("unsupported bass filter API"));
+
         let _ = fs::remove_file(path);
     }
 

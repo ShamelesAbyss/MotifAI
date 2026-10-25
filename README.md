@@ -1,15 +1,15 @@
-# 🌀 MotifAI v7.2.0
+# 🌀 MotifAI v7.3.0
 
 **An autonomous, local-AI symphonic song architect built on Rust and Strudel.**
 
 MotifAI bridges locally installed Ollama text-generation models—including compatible Qwen, DeepSeek, GLM, Nemotron, Devstral, and Mistral variants—with the Strudel.cc live-coding music environment.
 
-As of v7.2.0, MotifAI combines:
+As of v7.3.0, MotifAI combines:
 
 - A work-mode-aware Composition Orchestrator.
 - The 65-architecture Master Composition & Performance Palette.
 - Recipe-based request compilation with task-aware inference profiles and live NDJSON token streaming.
-- Evidence-ranked Engram Planner for compact, task-relevant empirical memory retrieval.
+- Evidence-ranked Engram Planner with finding-specific feedback, memory selection visibility, and repeated runtime-failure retrieval.
 - A two-stage verification loop: Conservative Lexical Preflight followed by Embedded Strudel REPL Runtime Evaluation.
 
 Describe your musical vision and style DNA, and MotifAI autonomously structures, codes, validates, and arranges an executable Strudel JavaScript composition in real time. You control the creative steering: use **Smart Auto**, switch to **Free-Form** for zero blueprint injection, or opt in to **Golden Scorebook** tracks and **Empirical Memory Advisory** whenever you choose[cite: 3, 6, 7, 10].
@@ -70,18 +70,20 @@ Manage your local `knowledge/golden_tracks` folder through an interactive overla
 
 Frequency-weighted, phrase-aware retrieval dynamically pulls up to **three curated Strudel syntax and DSP cards** from `knowledge/strudel_production_library.json`, based on your vision, style DNA, and any active compiler/runtime errors.
 
-### 🗄️ Conditional Empirical Memory · `Ctrl+A` / `Ctrl+Y` / `Ctrl+N`
+### 🗄️ Conditional Empirical Memory · `Ctrl+A` / `Ctrl+K` / `Ctrl+Y` / `Ctrl+N`
 
 MotifAI records AST and runtime outcomes alongside explicit **Like** (`Ctrl+Y`) and **Revise** (`Ctrl+N`) signals. Prompt injection stays **OFF by default** until you turn Memory Advisory on with `Ctrl+A`.
 
-### 🧠 Engram Planner · evidence-ranked memory for v7.2.0
+### 🧠 Engram Planner · evidence-ranked memory for v7.3.0
+
+**v7.3.0 update:** Engram now closes the feedback loop. `Ctrl+K` shows the latest eligible/relevant/selected findings, their estimated token costs, and whether the prompt compiler included or trimmed them. Users can rate an individual provenance-backed musical finding without treating a whole-track rating as approval of every detected feature. Repeated embedded Strudel runtime failures are stored against their diagnostics and become retrievable after the evidence threshold is met. Advisory injection remains opt-in.
 
 `src/engram_planner.rs` separates memory retrieval from memory persistence. `SonicIntelligence` remains the source of durable experiments, findings, and feedback; the Engram Planner is a pure request-time planner that reads those records and chooses a small, auditable subset for one generation. It adds no tokenizer dependency, does not change the memory JSON schema, and does not save model chain-of-thought.
 
 Memory must pass an evidence gate before it can enter a prompt:
 
 - A preference finding must have provenance, be non-heuristic and non-descriptive, and have at least two explicit user signals with a decisive approval rate (at least 75% approval or at most 25%).
-- A technical warning must be a non-heuristic AST diagnostic with at least two recorded technical failures.
+- A technical warning must be a non-heuristic AST or embedded-runtime diagnostic with at least two recorded technical failures.
 - Heuristic-only findings, missing provenance, single observations, mixed preference evidence, and descriptive counts are excluded.
 
 Eligible findings are ranked using term overlap with the current vision and style, confidence, epistemic status, evidence strength and consistency, and recency. Evidence loses weight with a 180-day half-life. The planner uses the user's current direction as its search query; it omits the full existing score so identifiers and code text do not overwhelm the request. Tie-breaking is deterministic. Selection is capped at eight notes and four per memory category, with each note limited to 240 characters.
@@ -89,6 +91,8 @@ Eligible findings are ranked using term overlap with the current vision and styl
 The memory block receives a bounded share of the selected model's reported context window: 1.5%, with a 192-token floor and a 512-token ceiling. The estimate reuses MotifAI's conservative character-based fallback because Ollama model families do not share one tokenizer. It is explicitly an estimate, not a DeepSeek tokenizer applied to unrelated models. When Ollama reports `prompt_eval_count`, `forge_debug.log` records it beside the full-prompt estimate and the actual-to-estimated ratio so behavior can be compared across installed models.
 
 `ENGRAM_MEMORY_PLAN` diagnostics report the model, budget, eligible and relevant counts, selected finding IDs, relevance hits, and scores; they do not write memory statements to the log. The prompt labels retrieved notes as untrusted evidence, not instructions, and the normal recipe sanitizer still processes the advisory before sending it to Ollama. Memory injection remains opt-in through `Ctrl+A`. If no supported finding matches the current request, the planner reports that no relevant evidence is available. If relevant evidence exceeds the memory budget, it reports that separately and injects none of it.
+
+Use `Ctrl+K` to open **Engram Memory Review**. It shows the most recent plan's eligible, relevant, and selected counts, the selected notes and their estimated token costs, and whether the request compiler included the notes or trimmed them to fit. The planner can produce this local preview while injection is OFF; the advisory is sent to Ollama only while `Ctrl+A` is ON. In the review, use Up/Down to choose a provenance-backed, non-heuristic musical or experiential finding from the active composition, then `Y` or `N` to record feedback against that finding alone. These keys do not rate the whole composition; `Ctrl+Y` and `Ctrl+N` remain whole-composition feedback. When generation exhausts its repair budget on an embedded runtime failure, MotifAI stores the failed experiment and attaches the technical failure to its runtime diagnostic so repeated failures can later be retrieved by Engram.
 
 ### 🕰️ Session Time Machine & Non-Destructive Exports
 
@@ -116,7 +120,7 @@ You need **Rust** and **Ollama** installed to run MotifAI.
 
 #### Recommended environment settings: keep-alive & context
 
-MotifAI v7.2.0 chooses a base context/output profile by task and reported model metadata, then clamps context to the model's reported limit where available. The recipe compiler estimates the complete system-plus-user request conservatively, trims optional references in order, and stops with an actionable error if the mandatory brief, rules, and existing score still exceed the effective input/output budget. `strudel_rules.md` is resolved from the project directory; set `MOTIFAI_STRUDEL_RULES` to an alternate rulebook path if needed. If the required rules cannot be read, generation stops visibly.
+MotifAI v7.3.0 chooses a base context/output profile by task and reported model metadata, then clamps context to the model's reported limit where available. The recipe compiler estimates the complete system-plus-user request conservatively, trims optional references in order, and stops with an actionable error if the mandatory brief, rules, and existing score still exceed the effective input/output budget. `strudel_rules.md` is resolved from the project directory; set `MOTIFAI_STRUDEL_RULES` to an alternate rulebook path if needed. If the required rules cannot be read, generation stops visibly.
 
 - **14B models:** 32,768 tokens.
 - **24B–32B models:** 16,384–24,576 tokens.
