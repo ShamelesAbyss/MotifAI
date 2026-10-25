@@ -1,20 +1,21 @@
 //! MotifAI Structured Prompt Recipe & Context Budgeting Engine.
 //!
-//! Inspired by `deepseek-recipe` (`Conversation` AST normalization, deferred
-//! context loading, and `ConversationRequest::resolve_max_tokens`), this module
-//! integrates bidirectionally with `orchestrator.rs` and `strudel_ast.rs`:
+//! Modeled on `deepseek-ai/deepseek-recipe` (v0.2.0 `ConversationRequest`,
+//! `ModelVersion::resolve_top_p`, `RenderedPrompt::special_ranges`,
+//! `ParsingOptions::stop_sequences`, and `ConversationRequest::resolve_max_tokens`),
+//! this module integrates bidirectionally with `orchestrator.rs`, `strudel_ast.rs`,
+//! and `main.rs`:
 //! 1. Slices `strudel_rules.md` into an Always-On Core Contract plus on-demand
 //!    domain slices (`P1.3`), combining AST capability inspection (`strudel_ast`),
 //!    orchestrator intent helpers, and `orchestrator::inspect_existing_score`
 //!    defect telemetry while enforcing model-tier character budgets.
-//! 2. Enforces a KV-Cache-Locked prefix layout: the `system` prompt and the top
-//!    of the `user` prompt remain byte-for-byte identical across retry attempts,
-//!    moving mutable items (`production_reference`, `error_feedback`, delta
-//!    error-triggered rule slices, and the per-attempt `seed`) to the trailing suffix.
-//! 3. Switches retry passes (`attempt > 1` with a failed candidate) into a
-//!    Compact Repair Replay mode driven by `orchestrator::build_compact_repair_directive`,
-//!    replacing ~6,500 characters of creation lecture and 14,000 characters of
-//!    blueprint boilerplate with a surgical repair directive.
+//! 2. Sanitizes untrusted text segments against accidental special-token spellings
+//!    (`<|im_end|>`, `<|endoftext|>`, `<|fim_pad|>`, `<|repo_name|>`, `<|file_sep|>`, `</s>`).
+//! 3. Enforces a KV-Cache-Locked prefix layout and a Context Headroom Guard that
+//!    progressively sheds optional context layers (`scraped-web`, `blueprint-seed`,
+//!    `production-cards`) if input tokens threaten to crowd out `num_predict`.
+//! 4. Resolves model-family sampling parameters (`temperature`, `top_p`,
+//!    `repeat_penalty`, and decode `stop_sequences`) alongside `num_ctx` and `num_predict`.
 
 use crate::{orchestrator, strudel_ast};
 use std::{
@@ -93,6 +94,48 @@ impl RecipePassMode {
     }
 }
 
+/// Model family classification modeled on `deepseek-recipe`'s `ModelVersion`
+/// resolution (`ConversionOptions::model_versions_by_name`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelFamily {
+    QwenCoder,
+    DeepSeek,
+    OpenHands,
+    GeneralCoder,
+}
+
+impl ModelFamily {
+    pub fn from_model_name(model: &str) -> Self {
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("deepseek") {
+            Self::DeepSeek
+        } else if lower.contains("openhands") {
+            Self::OpenHands
+        } else if lower.contains("qwen") {
+            Self::QwenCoder
+        } else {
+            Self::GeneralCoder
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::QwenCoder => "qwen-coder",
+            Self::DeepSeek => "deepseek",
+            Self::OpenHands => "openhands",
+            Self::GeneralCoder => "general-coder",
+        }
+    }
+}
+
+/// Lightweight UI profile summary used by `main.rs` when cycling or discovering models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiInferenceProfile {
+    pub num_ctx: u32,
+    pub num_predict: i32,
+    pub profile_name: &'static str,
+}
+
 /// Input specification for compiling one generation or repair pass.
 pub struct RecipeSpec<'a> {
     pub model: &'a str,
@@ -114,17 +157,23 @@ pub struct RecipeSpec<'a> {
     pub error_feedback: &'a str,
 }
 
-/// Compiled, cache-aligned prompt pair and resolved token budget.
+/// Compiled, cache-aligned prompt pair and resolved `InferenceOptions` budget.
 #[derive(Debug, Clone)]
 pub struct CompiledRecipe {
     pub system_prompt: String,
     pub user_prompt: String,
     pub num_ctx: u32,
     pub num_predict: i32,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub repeat_penalty: f32,
+    pub stop_sequences: Vec<String>,
+    pub model_family: ModelFamily,
     pub estimated_input_tokens: usize,
     pub active_domains: Vec<&'static str>,
     pub pass_mode: RecipePassMode,
     pub profile_name: &'static str,
+    pub trimmed_layers: Vec<&'static str>,
 }
 
 pub fn is_heavy_offload_model(model: &str) -> bool {
@@ -132,6 +181,48 @@ pub fn is_heavy_offload_model(model: &str) -> bool {
     ["32b", "30b", "27b", "24b", "22b", "20b", "openhands"]
         .iter()
         .any(|tag| lower_model.contains(tag))
+}
+
+/// Resolves the baseline inference profile for UI display (`Ctrl+M` model switch
+/// and startup discovery) so `main.rs` and `recipe_engine.rs` share one source of truth.
+pub fn resolve_ui_inference_profile(
+    model: &str,
+    user_prompt: &str,
+    style_ref: &str,
+) -> UiInferenceProfile {
+    let combined = format!("{}\n{}", user_prompt, style_ref);
+    let is_extended = orchestrator::is_extended_composition_request(&combined);
+    let is_heavy = is_heavy_offload_model(model);
+
+    let (default_ctx, default_predict, profile_name) = if is_heavy {
+        if is_extended {
+            (24_576, 6_144, "deep-extended")
+        } else {
+            (16_384, 4_096, "deep-balanced")
+        }
+    } else if is_extended {
+        (32_768, 8_192, "interactive-extended")
+    } else {
+        (32_768, 4_096, "interactive-fast")
+    };
+
+    let num_ctx = std::env::var("MOTIFAI_NUM_CTX")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&v| (4096..=131_072).contains(&v))
+        .unwrap_or(default_ctx);
+
+    let num_predict = std::env::var("MOTIFAI_NUM_PREDICT")
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .filter(|&v| v == -1 || (512..=32_768).contains(&v))
+        .unwrap_or(default_predict);
+
+    UiInferenceProfile {
+        num_ctx,
+        num_predict,
+        profile_name,
+    }
 }
 
 /// Helper used by `orchestrator.rs` so the orchestration directive can embed
@@ -147,9 +238,80 @@ pub fn active_domain_labels_for_context(
     labels
 }
 
+/// Neutralizes raw special-token spellings inside untrusted text segments so
+/// scraped web pages, comments, or user text cannot inject control tokens such as
+/// `<|im_end|>`, `<|endoftext|>`, `<|im_start|>`, `<|fim_pad|>`, `<|repo_name|>`,
+/// `<|file_sep|>`, or `</s>` into the rendered prompt (modeled on `deepseek-recipe`
+/// v0.2.0's `RenderedPrompt::special_ranges` boundary protection).
+pub fn sanitize_special_tokens(input: &str) -> String {
+    if !input.contains("<|") && !input.contains("</s>") && !input.contains("<｜") {
+        return input.to_string();
+    }
+    input
+        .replace("<|im_end|>", "[im_end]")
+        .replace("<|im_start|>", "[im_start]")
+        .replace("<|endoftext|>", "[endoftext]")
+        .replace("<|fim_pad|>", "[fim_pad]")
+        .replace("<|fim_prefix|>", "[fim_prefix]")
+        .replace("<|fim_suffix|>", "[fim_suffix]")
+        .replace("<|fim_middle|>", "[fim_middle]")
+        .replace("<|repo_name|>", "[repo_name]")
+        .replace("<|file_sep|>", "[file_sep]")
+        .replace("</s>", "[/s]")
+        .replace("<｜end▁of▁sentence｜>", "[eos]")
+        .replace("<｜begin▁of▁sentence｜>", "[bos]")
+}
+
+/// Resolves sampling parameters (`temperature`, `top_p`, `repeat_penalty`, and
+/// `stop_sequences`) based on `ModelFamily`, `WorkMode`, and `RecipePassMode`.
+pub fn resolve_sampling_options(
+    model_family: ModelFamily,
+    work_mode: orchestrator::WorkMode,
+    pass_mode: RecipePassMode,
+    attempt: usize,
+) -> (f32, f32, f32, Vec<String>) {
+    let (temperature, top_p, repeat_penalty) = match pass_mode {
+        RecipePassMode::CompactRepair => {
+            // Low temperature, tight top_p, and gentle repeat_penalty so the model
+            // preserves working variable names and stems while fixing the defect.
+            (0.22, 0.85, 1.02)
+        }
+        RecipePassMode::FullComposition => {
+            if attempt > 1 {
+                (0.25, 0.86, 1.02)
+            } else {
+                match work_mode {
+                    orchestrator::WorkMode::Create => match model_family {
+                        ModelFamily::DeepSeek => (0.42, 0.94, 1.04),
+                        ModelFamily::QwenCoder
+                        | ModelFamily::OpenHands
+                        | ModelFamily::GeneralCoder => (0.40, 0.92, 1.04),
+                    },
+                    orchestrator::WorkMode::Evolution => (0.45, 0.92, 1.03),
+                    orchestrator::WorkMode::TargetedEdit => (0.32, 0.88, 1.02),
+                    orchestrator::WorkMode::Repair => (0.24, 0.85, 1.02),
+                }
+            }
+        }
+    };
+
+    // Stop sequences halt decoding immediately if the model attempts to close a
+    // markdown code fence or append explanatory prose after the final Pattern.
+    let stop_sequences = vec![
+        "\n```".to_string(),
+        "\n### ".to_string(),
+        "\nExplanation:".to_string(),
+        "\nNote:".to_string(),
+        "<|im_end|>".to_string(),
+        "<|endoftext|>".to_string(),
+    ];
+
+    (temperature, top_p, repeat_penalty, stop_sequences)
+}
+
 /// Compiles a `RecipeSpec` into a KV-cache-aligned `(system_prompt, user_prompt)`
-/// pair with on-demand rule slicing, AST + Orchestrator domain activation, and
-/// resolved token budgets.
+/// pair with on-demand rule slicing, AST + Orchestrator domain activation,
+/// special-token sanitization, context headroom protection, and resolved sampling options.
 pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
     let pass_mode = if spec.attempt > 1 && spec.last_failed_candidate.is_some() {
         RecipePassMode::CompactRepair
@@ -157,6 +319,7 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
         RecipePassMode::FullComposition
     };
 
+    let model_family = ModelFamily::from_model_name(spec.model);
     let is_heavy = is_heavy_offload_model(spec.model);
     let rule_char_budget = if is_heavy {
         MAX_SLICED_RULE_CHARS_HEAVY
@@ -164,12 +327,18 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
         MAX_SLICED_RULE_CHARS_FAST
     };
 
+    let clean_user_prompt = sanitize_special_tokens(spec.user_prompt);
+    let clean_style_ref = sanitize_special_tokens(spec.style_ref);
+    let clean_scraped = sanitize_special_tokens(spec.scraped_context);
+    let clean_empirical = sanitize_special_tokens(spec.empirical_advisory);
+    let clean_curated = sanitize_special_tokens(spec.curated_track_advisory);
+
     // 1. Base domains for the system prompt are derived strictly from the request-invariant
     // inputs (`user_prompt`, `style_ref`, `existing_code`) so `system_prompt` stays
     // byte-for-byte identical across all 5 attempts and preserves Ollama's KV cache.
     let base_domain_set = detect_active_domains(
-        spec.user_prompt,
-        spec.style_ref,
+        &clean_user_prompt,
+        &clean_style_ref,
         spec.existing_code,
         None,
     );
@@ -207,28 +376,77 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
 
     let system_prompt = build_locked_system_prompt(
         &sliced_rules,
-        spec.empirical_advisory,
-        spec.curated_track_advisory,
+        &clean_empirical,
+        &clean_curated,
     );
 
     let (stable_orchestration, extracted_seed) =
         stabilize_orchestration_header(spec.orchestration_dna);
     let effective_seed = extracted_seed.unwrap_or(spec.seed);
 
-    let effective_vision = if spec.user_prompt.trim().is_empty() {
+    let effective_vision = if clean_user_prompt.trim().is_empty() {
         "Autonomous Agentic Choice: Invent a distinctive work whose form, layers, and production choices fit the style and emotional goal. Do not assume a fixed architecture."
     } else {
-        spec.user_prompt
+        clean_user_prompt.as_str()
     };
 
-    let effective_style = if spec.style_ref.trim().is_empty() {
+    let effective_style = if clean_style_ref.trim().is_empty() {
         "Autonomous Agentic Choice: Select the ideal instrumentation, synthesis techniques, and arrangement form that best serve the composition."
     } else {
-        spec.style_ref
+        clean_style_ref.as_str()
     };
+
+    let mut trimmed_layers: Vec<&'static str> = Vec::new();
+    let max_ctx_tokens = if is_heavy { 24_576usize } else { 32_768usize };
+    let reserve_tokens = 4_096usize + 1_024usize;
+    let max_allowed_input_tokens = max_ctx_tokens.saturating_sub(reserve_tokens);
 
     let user_prompt = match pass_mode {
         RecipePassMode::FullComposition => {
+            let mut use_scraped = clean_scraped.trim();
+            let mut use_blueprint = if is_heavy && spec.existing_code.is_some() {
+                if !spec.blueprint_context.trim().is_empty() {
+                    trimmed_layers.push("blueprint-heavy-evo");
+                }
+                ""
+            } else {
+                spec.blueprint_context.trim()
+            };
+            let mut use_prod_ref = spec.production_reference.trim();
+
+            // Context Headroom Guard (modeled on `deepseek-recipe` PR #44 & `resolve_max_tokens`):
+            // If the assembled input would exceed `max_allowed_input_tokens`, shed optional
+            // layers in priority order (`scraped-web` -> `blueprint-seed` -> `production-cards`).
+            let sys_tokens = estimate_tokens(&system_prompt);
+            let base_tokens = sys_tokens
+                + estimate_tokens(&stable_orchestration)
+                + estimate_tokens(effective_vision)
+                + estimate_tokens(effective_style)
+                + spec.existing_code.map(estimate_tokens).unwrap_or(0)
+                + estimate_tokens(spec.error_feedback)
+                + estimate_tokens(&delta_repair_rules);
+
+            let mut optional_tokens = estimate_tokens(use_scraped)
+                + estimate_tokens(use_blueprint)
+                + estimate_tokens(use_prod_ref);
+
+            if base_tokens + optional_tokens > max_allowed_input_tokens && !use_scraped.is_empty() {
+                optional_tokens = optional_tokens.saturating_sub(estimate_tokens(use_scraped));
+                use_scraped = "";
+                trimmed_layers.push("scraped-web");
+            }
+            if base_tokens + optional_tokens > max_allowed_input_tokens && !use_blueprint.is_empty()
+            {
+                optional_tokens = optional_tokens.saturating_sub(estimate_tokens(use_blueprint));
+                use_blueprint = "";
+                trimmed_layers.push("blueprint-seed");
+            }
+            if base_tokens + optional_tokens > max_allowed_input_tokens && !use_prod_ref.is_empty()
+            {
+                use_prod_ref = "";
+                trimmed_layers.push("production-cards");
+            }
+
             let mut prompt = String::with_capacity(8192);
             prompt.push_str(spec.mode_header);
             prompt.push('\n');
@@ -255,15 +473,15 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
                      Style / Reference Context: {}\n",
                     effective_vision, effective_style
                 ));
-                if !spec.scraped_context.trim().is_empty() {
+                if !use_scraped.is_empty() {
                     prompt.push_str(&format!(
                         "\nRetrieved Reference Page Context:\n{}\n",
-                        spec.scraped_context.trim()
+                        use_scraped
                     ));
                 }
-                if !spec.blueprint_context.trim().is_empty() && !is_heavy {
+                if !use_blueprint.is_empty() {
                     prompt.push('\n');
-                    prompt.push_str(spec.blueprint_context.trim());
+                    prompt.push_str(use_blueprint);
                     prompt.push('\n');
                 }
                 prompt.push_str(&format!("\nCurrent Score to Evolve:\n{}\n", current.trim()));
@@ -273,23 +491,23 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
                      Style / Reference Context: {}\n",
                     effective_vision, effective_style
                 ));
-                if !spec.scraped_context.trim().is_empty() {
+                if !use_scraped.is_empty() {
                     prompt.push_str(&format!(
                         "\nRetrieved Reference Page Context:\n{}\n",
-                        spec.scraped_context.trim()
+                        use_scraped
                     ));
                 }
-                if !spec.blueprint_context.trim().is_empty() {
+                if !use_blueprint.is_empty() {
                     prompt.push('\n');
-                    prompt.push_str(spec.blueprint_context.trim());
+                    prompt.push_str(use_blueprint);
                     prompt.push('\n');
                 }
             }
 
             // Tier 2: Mutable per-attempt suffix (production cards + delta rules + repair feedback + attempt seed).
-            if !spec.production_reference.trim().is_empty() {
+            if !use_prod_ref.is_empty() {
                 prompt.push_str("\n\n");
-                prompt.push_str(spec.production_reference.trim());
+                prompt.push_str(use_prod_ref);
             }
             if !delta_repair_rules.trim().is_empty() {
                 prompt.push_str("\n\nSUPPLEMENTARY ERROR-DOMAIN STRUDEL RULES:\n");
@@ -306,12 +524,16 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
             prompt
         }
         RecipePassMode::CompactRepair => {
-            // Use `orchestrator::build_compact_repair_directive` so repair passes
-            // receive exact harmonic context, stem role inventory, and score hazard
-            // diagnostics without re-evaluating 6,500 chars of creation lecture.
+            if !clean_scraped.trim().is_empty() {
+                trimmed_layers.push("scraped-web");
+            }
+            if !spec.blueprint_context.trim().is_empty() {
+                trimmed_layers.push("blueprint-seed");
+            }
+
             let compact_directive = orchestrator::build_compact_repair_directive(
-                spec.user_prompt,
-                spec.style_ref,
+                &clean_user_prompt,
+                &clean_style_ref,
                 spec.existing_code,
                 spec.last_failed_candidate,
                 spec.last_ast_error,
@@ -354,10 +576,13 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
 
     let estimated_input_tokens =
         estimate_tokens(&system_prompt) + estimate_tokens(&user_prompt);
+    let work_mode = orchestrator::classify_work_mode(&clean_user_prompt, spec.existing_code, 0);
+    let (temperature, top_p, repeat_penalty, stop_sequences) =
+        resolve_sampling_options(model_family, work_mode, pass_mode, spec.attempt);
     let (num_ctx, num_predict, profile_name) = resolve_token_budget(
         spec.model,
-        spec.user_prompt,
-        spec.style_ref,
+        &clean_user_prompt,
+        &clean_style_ref,
         spec.existing_code,
         spec.last_failed_candidate,
         pass_mode,
@@ -369,10 +594,16 @@ pub fn compile_generation_recipe(spec: &RecipeSpec<'_>) -> CompiledRecipe {
         user_prompt,
         num_ctx,
         num_predict,
+        temperature,
+        top_p,
+        repeat_penalty,
+        stop_sequences,
+        model_family,
         estimated_input_tokens,
         active_domains,
         pass_mode,
         profile_name,
+        trimmed_layers,
     }
 }
 
@@ -1070,5 +1301,43 @@ Use ._pianoroll() and ._punchcard().
         assert!(compiled
             .user_prompt
             .contains("MANDATORY REPAIR FEEDBACK: fix root"));
+    }
+
+    #[test]
+    fn special_token_sanitizer_neutralizes_control_tokens_without_touching_mini_notation() {
+        let dirty = "Make a beat <|im_end|> with note(\"<c4 e4 g4>\") and <|endoftext|> </s>";
+        let clean = sanitize_special_tokens(dirty);
+        assert!(!clean.contains("<|im_end|>"));
+        assert!(!clean.contains("<|endoftext|>"));
+        assert!(!clean.contains("</s>"));
+        assert!(clean.contains("note(\"<c4 e4 g4>\")"));
+    }
+
+    #[test]
+    fn model_family_and_sampling_options_adapt_to_work_mode_and_pass() {
+        let family = ModelFamily::from_model_name("qwen2.5-coder:32b");
+        assert_eq!(family, ModelFamily::QwenCoder);
+        assert_eq!(family.label(), "qwen-coder");
+
+        let (t_create, p_create, rp_create, stops) = resolve_sampling_options(
+            family,
+            orchestrator::WorkMode::Create,
+            RecipePassMode::FullComposition,
+            1,
+        );
+        assert_eq!(t_create, 0.40);
+        assert_eq!(p_create, 0.92);
+        assert_eq!(rp_create, 1.04);
+        assert!(stops.contains(&"\n```".to_string()));
+
+        let (t_repair, p_repair, rp_repair, _) = resolve_sampling_options(
+            family,
+            orchestrator::WorkMode::Evolution,
+            RecipePassMode::CompactRepair,
+            2,
+        );
+        assert_eq!(t_repair, 0.22);
+        assert_eq!(p_repair, 0.85);
+        assert_eq!(rp_repair, 1.02);
     }
 }

@@ -40,14 +40,14 @@ use tokio::{
     task::JoinHandle,
 };
 
-const APP_VERSION: &str = "6.11.0";
+const APP_VERSION: &str = "7.0.0";
 const LOOPBACK_IP: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 7777;
 const OLLAMA_PORT: u16 = 11434;
 
 const STRUDEL_WEB_HASH: &str = concat!("https", "://", "strudel.cc/#");
 // Pin the embedded REPL version so runtime evaluation behavior is reproducible.
-const STRUDEL_REPL_CDN: &str = concat!("https", "://", "unpkg.com/@strudel/repl@1.3.0");
+const STRUDEL_REPL_CDN: &str = concat!("https", "://", "[unpkg.com/@strudel/repl@1.3.0](https://unpkg.com/@strudel/repl@1.3.0)");
 const MAX_GENERATION_ATTEMPTS: usize = 5;
 const RUNTIME_VERIFY_WAIT_SECS: u64 = 30;
 const STUDIO_CLIENT_CONNECT_GRACE_SECS: u64 = 8;
@@ -161,6 +161,8 @@ struct OllamaOptions {
     num_ctx: u32,
     num_predict: i32,
     seed: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stop: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -173,59 +175,14 @@ struct OllamaRequest {
     options: OllamaOptions,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InferenceProfile {
-    num_ctx: u32,
-    num_predict: i32,
-    profile_name: &'static str,
-}
-
-/// Resolves an inference profile suited for an 8 GB VRAM GPU unless overridden by
-/// `MOTIFAI_NUM_CTX` and/or `MOTIFAI_NUM_PREDICT`.
-fn resolve_inference_profile(model: &str, user_prompt: &str, style_ref: &str) -> InferenceProfile {
-    let lower_model = model.to_ascii_lowercase();
-    let combined = format!("{}\n{}", user_prompt, style_ref).to_ascii_lowercase();
-    let is_extended = [
-        "concert", "live set", "dj set", "full set", "festival set", "album side",
-        "long-form", "long form", "extended", "multi-movement", "multi movement",
-        "suite", "96-bar", "96 bar", "128-bar",
-    ]
-    .iter()
-    .any(|kw| combined.contains(kw));
-
-    let is_heavy_model = ["32b", "30b", "27b", "24b", "22b", "20b", "openhands"]
-        .iter()
-        .any(|tag| lower_model.contains(tag));
-
-    let (default_ctx, default_predict, profile_name) = if is_heavy_model {
-        if is_extended {
-            (24_576, 6_144, "deep-extended")
-        } else {
-            (16_384, 4_096, "deep-balanced")
-        }
-    } else if is_extended {
-        (32_768, 8_192, "interactive-extended")
-    } else {
-        (32_768, 4_096, "interactive-fast")
-    };
-
-    let num_ctx = std::env::var("MOTIFAI_NUM_CTX")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|&v| (4096..=131_072).contains(&v))
-        .unwrap_or(default_ctx);
-
-    let num_predict = std::env::var("MOTIFAI_NUM_PREDICT")
-        .ok()
-        .and_then(|v| v.trim().parse::<i32>().ok())
-        .filter(|&v| v == -1 || (512..=32_768).contains(&v))
-        .unwrap_or(default_predict);
-
-    InferenceProfile {
-        num_ctx,
-        num_predict,
-        profile_name,
-    }
+/// Resolves an inference profile via `recipe_engine::resolve_ui_inference_profile`
+/// so the TUI model switcher and startup status bar share the exact same profile logic.
+fn resolve_inference_profile(
+    model: &str,
+    user_prompt: &str,
+    style_ref: &str,
+) -> recipe_engine::UiInferenceProfile {
+    recipe_engine::resolve_ui_inference_profile(model, user_prompt, style_ref)
 }
 
 /// Selects the default model index from discovered Ollama models.
@@ -1599,9 +1556,7 @@ async fn generate_strudel_track(
 
     let scraped_context = scrape_reference_if_url(&style_ref, &scrape_client).await;
 
-    // Select once for the full generation request, before retries begin. Each retry
-    // builds a fresh prompt and inserts this same optional block once, preventing
-    // duplicate accumulation while keeping the composition architecture stable.
+    // Select once for the full generation request, before retries begin.
     let blueprint_context = match composition_blueprints::select_for_request_with_override(
         &user_prompt,
         &style_ref,
@@ -1673,20 +1628,25 @@ async fn generate_strudel_track(
     let mut previous_candidates: Vec<String> = Vec::new();
     let mut runtime_check_started = false;
 
-    // Repair is bounded and evidence-driven: preflight failures and actual REPL
-    // evaluation errors feed the next prompt alongside the rejected candidate code.
     for attempt in 1..=MAX_GENERATION_ATTEMPTS {
         let seed = fresh_entropy_seed().wrapping_add((attempt as u64) * 7919);
 
-        let orchestration_dna = orchestrator::build_orchestration_directive(
-            &user_prompt,
-            &style_ref,
-            existing_code
-                .as_deref()
-                .or(last_failed_candidate.as_deref()),
-            evo_gen,
-            seed,
-        );
+        // When `attempt > 1` has `last_failed_candidate`, `recipe_engine` switches to
+        // `CompactRepair` mode and builds its own surgical repair directive via
+        // `orchestrator::build_compact_repair_directive`, saving a 6.5K string allocation.
+        let orchestration_dna = if attempt > 1 && last_failed_candidate.is_some() {
+            String::new()
+        } else {
+            orchestrator::build_orchestration_directive(
+                &user_prompt,
+                &style_ref,
+                existing_code
+                    .as_deref()
+                    .or(last_failed_candidate.as_deref()),
+                evo_gen,
+                seed,
+            )
+        };
 
         let error_feedback = build_repair_feedback(
             last_ast_error.as_deref(),
@@ -1723,28 +1683,30 @@ async fn generate_strudel_track(
             error_feedback: &error_feedback,
         });
 
-        // A clean first pass favors reliable executable structure. Once a concrete
-        // defect exists, low-temperature repair is more useful than a more chaotic rewrite.
-        let temp = if attempt == 1 {
-            if existing_code.is_some() { 0.45 } else { 0.40 }
-        } else {
-            0.25
-        };
+        let temp = compiled_recipe.temperature;
+        let pass_label = compiled_recipe.pass_mode.label();
+        let est_in = compiled_recipe.estimated_input_tokens;
+        let slice_count = compiled_recipe.active_domains.len();
 
         log_diag(
             "OLLAMA_REQUEST_START",
             &format!(
-                "attempt={}/{} mode={} model='{}' profile={} slices=[{}] est_in_tokens={} num_ctx={} num_predict={} temp={:.2} system_chars={} prompt_chars={}",
+                "attempt={}/{} mode={} family={} model='{}' profile={} slices=[{}] trimmed=[{}] est_in_tokens={} num_ctx={} num_predict={} temp={:.2} top_p={:.2} rep_pen={:.2} stops={} system_chars={} prompt_chars={}",
                 attempt,
                 MAX_GENERATION_ATTEMPTS,
-                compiled_recipe.pass_mode.label(),
+                pass_label,
+                compiled_recipe.model_family.label(),
                 model,
                 compiled_recipe.profile_name,
                 compiled_recipe.active_domains.join(","),
-                compiled_recipe.estimated_input_tokens,
+                compiled_recipe.trimmed_layers.join(","),
+                est_in,
                 compiled_recipe.num_ctx,
                 compiled_recipe.num_predict,
                 temp,
+                compiled_recipe.top_p,
+                compiled_recipe.repeat_penalty,
+                compiled_recipe.stop_sequences.len(),
                 compiled_recipe.system_prompt.chars().count(),
                 compiled_recipe.user_prompt.chars().count()
             ),
@@ -1758,19 +1720,27 @@ async fn generate_strudel_track(
             think: false,
             options: OllamaOptions {
                 temperature: temp,
-                top_p: 0.92,
-                repeat_penalty: 1.04,
+                top_p: compiled_recipe.top_p,
+                repeat_penalty: compiled_recipe.repeat_penalty,
                 num_ctx: compiled_recipe.num_ctx,
                 num_predict: compiled_recipe.num_predict,
                 seed,
+                stop: compiled_recipe.stop_sequences,
             },
         };
 
         if attempt > 1 {
             let _ = tx
                 .send(BotEvent::StatusUpdate(format!(
-                    "Agent repairing candidate via '{}' (Attempt {}/{}, temp={:.2}) [Esc to cancel]...",
-                    model, attempt, MAX_GENERATION_ATTEMPTS, temp
+                    "Agent '{}' [{} | {} slices | ~{} in-tok] repairing (Attempt {}/{}, temp={:.2}) [Esc to cancel]...",
+                    model, pass_label, slice_count, est_in, attempt, MAX_GENERATION_ATTEMPTS, temp
+                )))
+                .await;
+        } else {
+            let _ = tx
+                .send(BotEvent::StatusUpdate(format!(
+                    "Agent '{}' [{} | {} slices | ~{} in-tok] prefilling & composing [Esc to cancel]...",
+                    model, pass_label, slice_count, est_in
                 )))
                 .await;
         }
@@ -1854,8 +1824,8 @@ async fn generate_strudel_track(
                                 let rate = (chunk_count as f32) / elapsed;
                                 let _ = tx
                                     .send(BotEvent::StatusUpdate(format!(
-                                        "Agent '{}' streaming (Attempt {}/{}): ~{} tokens ({:.1} tok/s, {:.0}s) [Esc to cancel]...",
-                                        model, attempt, MAX_GENERATION_ATTEMPTS, chunk_count, rate, elapsed
+                                        "Agent '{}' [{} | ~{} in-tok] streaming ({}/{}): ~{} tok ({:.1} tok/s, {:.0}s) [Esc to cancel]...",
+                                        model, pass_label, est_in, attempt, MAX_GENERATION_ATTEMPTS, chunk_count, rate, elapsed
                                     )))
                                     .await;
                                 last_ui_update = Instant::now();
